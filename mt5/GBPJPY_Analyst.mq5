@@ -280,6 +280,12 @@ string CaptureTimeframeScreenshot(ENUM_TIMEFRAMES tf, string tfLabel)
    //--- Prevent temp chart from stealing focus from main chart
    ChartSetInteger(chartId, CHART_BRING_TO_TOP, false);
 
+   //--- FIRST: Wait for chart to fully initialize and load bar data
+   ChartRedraw(chartId);
+   Sleep(2000);
+
+   //--- NOW apply properties (after MT5 finished default initialization)
+
    //--- General: Candle chart, shift, autoscroll
    ChartSetInteger(chartId, CHART_MODE, CHART_CANDLES);
    ChartSetInteger(chartId, CHART_SHIFT, true);
@@ -313,9 +319,9 @@ string CaptureTimeframeScreenshot(ENUM_TIMEFRAMES tf, string tfLabel)
    ChartSetInteger(chartId, CHART_COLOR_LAST, clrBlack);
    ChartSetInteger(chartId, CHART_COLOR_STOP_LEVEL, clrOrangeRed);
 
-   //--- Wait for chart data to load and template to render
+   //--- Redraw with applied properties, then wait before screenshot
    ChartRedraw(chartId);
-   Sleep(2000);
+   Sleep(1000);
    ChartRedraw(chartId);
    Sleep(500);
 
