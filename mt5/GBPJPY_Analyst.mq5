@@ -70,6 +70,10 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTimer()
 {
+   //--- Ensure scan button exists (may be lost after template operations)
+   if(ObjectFind(0, "btnManualScan") < 0)
+      CreateManualButton();
+
    //--- Reset daily flags on new day
    MqlDateTime dt;
    TimeCurrent(dt);
@@ -238,6 +242,9 @@ bool RunAnalysis(string session)
    FileDelete(fileH1);
    FileDelete(fileM15);
    FileDelete(fileM5);
+
+   //--- Restore scan button (temp chart operations may have removed it)
+   CreateManualButton();
 
    return result;
 }
