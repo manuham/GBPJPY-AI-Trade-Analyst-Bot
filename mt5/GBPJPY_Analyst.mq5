@@ -33,6 +33,8 @@ string   g_screenshotDir;
 //+------------------------------------------------------------------+
 int OnInit()
 {
+   Print(">>> HELLO WORLD - Version 2026.02.07 <<<");
+
    //--- Set up screenshot directory
    g_screenshotDir = "GBPJPY_Analyst";
 
