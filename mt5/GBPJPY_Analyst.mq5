@@ -81,11 +81,14 @@ void OnTimer()
       Print("New day detected — scan flags reset.");
    }
 
-   //--- Check if manual trigger is set
+   //--- Check if manual trigger is set (fires once then respects cooldown)
    if(InpManualTrigger)
    {
-      Print("Manual trigger detected via input parameter.");
-      RunAnalysis("Manual");
+      if(IsCooldownElapsed())
+      {
+         Print("Manual trigger detected via input parameter.");
+         RunAnalysis("Manual");
+      }
       return;
    }
 
