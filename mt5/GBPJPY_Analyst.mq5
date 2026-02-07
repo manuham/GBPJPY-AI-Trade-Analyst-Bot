@@ -39,6 +39,12 @@ int OnInit()
    //--- Create timer for checking every 10 seconds
    EventSetTimer(10);
 
+   //--- Save main chart layout as template for temp charts
+   if(ChartSaveTemplate(0, "gbpjpy_analyst_auto"))
+      Print("Main chart template saved as gbpjpy_analyst_auto.tpl");
+   else
+      Print("WARNING: Failed to save main chart template (error ", GetLastError(), ")");
+
    //--- Create manual trigger button
    CreateManualButton();
 
@@ -259,33 +265,10 @@ bool RunAnalysis(string session)
 }
 
 //+------------------------------------------------------------------+
-//| Capture screenshot for a specific timeframe                        |
+//| Apply chart visual properties to a given chart                     |
 //+------------------------------------------------------------------+
-string CaptureTimeframeScreenshot(ENUM_TIMEFRAMES tf, string tfLabel)
+void ApplyChartProperties(long chartId)
 {
-   string filename = g_screenshotDir + "\\" + tfLabel + "_" +
-                     TimeToString(TimeCurrent(), TIME_DATE) + "_" +
-                     IntegerToString(GetTickCount()) + ".png";
-
-   //--- Open a temporary chart
-   long chartId = ChartOpen(_Symbol, tf);
-   if(chartId <= 0)
-   {
-      Print("ERROR: Failed to open temporary chart for ", tfLabel, " (error ", GetLastError(), ")");
-      return "";
-   }
-
-   Print("Opened temp chart ", chartId, " for ", tfLabel);
-
-   //--- Prevent temp chart from stealing focus from main chart
-   ChartSetInteger(chartId, CHART_BRING_TO_TOP, false);
-
-   //--- FIRST: Wait for chart to fully initialize and load bar data
-   ChartRedraw(chartId);
-   Sleep(2000);
-
-   //--- NOW apply properties (after MT5 finished default initialization)
-
    //--- General: Candle chart, shift, autoscroll
    ChartSetInteger(chartId, CHART_MODE, CHART_CANDLES);
    ChartSetInteger(chartId, CHART_SHIFT, true);
@@ -308,22 +291,63 @@ string CaptureTimeframeScreenshot(ENUM_TIMEFRAMES tf, string tfLabel)
    ChartSetInteger(chartId, CHART_COLOR_BACKGROUND, clrSilver);
    ChartSetInteger(chartId, CHART_COLOR_FOREGROUND, clrBlack);
    ChartSetInteger(chartId, CHART_COLOR_GRID, clrSilver);
-   ChartSetInteger(chartId, CHART_COLOR_CHART_UP, clrDimGray);        // Bar up
-   ChartSetInteger(chartId, CHART_COLOR_CHART_DOWN, clrBlack);        // Bar down
-   ChartSetInteger(chartId, CHART_COLOR_CANDLE_BULL, C'0,63,210');    // Candle bull (blue)
-   ChartSetInteger(chartId, CHART_COLOR_CANDLE_BEAR, clrBlack);       // Candle bear
-   ChartSetInteger(chartId, CHART_COLOR_CHART_LINE, clrBlack);        // Line chart
+   ChartSetInteger(chartId, CHART_COLOR_CHART_UP, clrDimGray);
+   ChartSetInteger(chartId, CHART_COLOR_CHART_DOWN, clrBlack);
+   ChartSetInteger(chartId, CHART_COLOR_CANDLE_BULL, C'0,63,210');
+   ChartSetInteger(chartId, CHART_COLOR_CANDLE_BEAR, clrBlack);
+   ChartSetInteger(chartId, CHART_COLOR_CHART_LINE, clrBlack);
    ChartSetInteger(chartId, CHART_COLOR_VOLUME, clrGreen);
    ChartSetInteger(chartId, CHART_COLOR_BID, clrBlack);
    ChartSetInteger(chartId, CHART_COLOR_ASK, clrBlack);
    ChartSetInteger(chartId, CHART_COLOR_LAST, clrBlack);
    ChartSetInteger(chartId, CHART_COLOR_STOP_LEVEL, clrOrangeRed);
+}
 
-   //--- Redraw with applied properties, then wait before screenshot
-   ChartRedraw(chartId);
-   Sleep(1000);
+//+------------------------------------------------------------------+
+//| Capture screenshot for a specific timeframe                        |
+//+------------------------------------------------------------------+
+string CaptureTimeframeScreenshot(ENUM_TIMEFRAMES tf, string tfLabel)
+{
+   string filename = g_screenshotDir + "\\" + tfLabel + "_" +
+                     TimeToString(TimeCurrent(), TIME_DATE) + "_" +
+                     IntegerToString(GetTickCount()) + ".png";
+
+   //--- Open a temporary chart
+   long chartId = ChartOpen(_Symbol, tf);
+   if(chartId <= 0)
+   {
+      Print("ERROR: Failed to open temporary chart for ", tfLabel, " (error ", GetLastError(), ")");
+      return "";
+   }
+
+   Print("Opened temp chart ", chartId, " for ", tfLabel);
+
+   //--- Prevent temp chart from stealing focus from main chart
+   ChartSetInteger(chartId, CHART_BRING_TO_TOP, false);
+
+   //--- Wait for chart to fully initialize
    ChartRedraw(chartId);
    Sleep(500);
+
+   //--- Apply saved template from main chart (most reliable method)
+   if(!ChartApplyTemplate(chartId, "gbpjpy_analyst_auto"))
+      Print("WARNING: Template apply failed (error ", GetLastError(), "), using manual properties");
+
+   //--- Force redraw after template, then wait for it to take effect
+   ChartRedraw(chartId);
+   Sleep(2000);
+
+   //--- Apply manual properties ON TOP of template (ensures correct even if template partial)
+   ApplyChartProperties(chartId);
+
+   //--- Final redraw and wait
+   ChartRedraw(chartId);
+   Sleep(1000);
+
+   //--- Verify properties took effect
+   long bgColor = ChartGetInteger(chartId, CHART_COLOR_BACKGROUND);
+   long gridVisible = ChartGetInteger(chartId, CHART_SHOW_GRID);
+   Print(tfLabel, " chart verify: bg_color=", bgColor, " (expect ", (long)clrSilver, "), grid=", gridVisible, " (expect 0)");
 
    //--- Take screenshot
    bool success = ChartScreenShot(chartId, filename, InpScreenshotWidth, InpScreenshotHeight);
