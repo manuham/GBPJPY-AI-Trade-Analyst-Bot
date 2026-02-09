@@ -46,6 +46,11 @@ ulong    g_limitTicket2  = 0;   // TP2 limit order ticket
 string   g_limitSession  = "";  // "London" or "NY" — which session placed the orders
 string   g_limitTradeId  = "";  // Trade ID for logging
 
+//--- Open position tracking (for close detection)
+ulong    g_posTicket1    = 0;   // TP1 position ticket (market orders)
+ulong    g_posTicket2    = 0;   // TP2 position ticket (market orders)
+string   g_posTradeId    = "";  // Trade ID for the currently tracked positions
+
 //--- Trade object
 CTrade g_trade;
 
@@ -184,6 +189,202 @@ void OnTimer()
 
    //--- Check if pending limit orders should be cancelled (session end)
    CheckLimitOrderExpiry();
+
+   //--- Check if tracked positions have closed (TP/SL hit)
+   CheckPositionClosures();
+}
+
+//+------------------------------------------------------------------+
+//| Trade transaction handler — detect when limit orders fill           |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest &request,
+                        const MqlTradeResult &result)
+{
+   //--- When a pending order fills, it becomes a position → start tracking
+   if(trans.type == TRADE_TRANSACTION_ORDER_DELETE)
+   {
+      //--- Check if this was one of our limit orders filling
+      if(g_limitTicket1 > 0 && trans.order == g_limitTicket1)
+      {
+         //--- Limit order filled → find the resulting position
+         if(trans.order_state == ORDER_STATE_FILLED)
+         {
+            g_posTicket1 = trans.order;   // position ticket often matches order ticket
+            g_posTradeId = g_limitTradeId;
+            Print("Limit order #", g_limitTicket1, " (TP1) FILLED — now tracking position");
+         }
+      }
+      if(g_limitTicket2 > 0 && trans.order == g_limitTicket2)
+      {
+         if(trans.order_state == ORDER_STATE_FILLED)
+         {
+            g_posTicket2 = trans.order;
+            g_posTradeId = g_limitTradeId;
+            Print("Limit order #", g_limitTicket2, " (TP2) FILLED — now tracking position");
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Check if tracked positions have been closed (TP/SL hit)            |
+//+------------------------------------------------------------------+
+void CheckPositionClosures()
+{
+   if(g_posTicket1 == 0 && g_posTicket2 == 0)
+      return;
+
+   //--- Check TP1 position
+   if(g_posTicket1 > 0)
+   {
+      if(!PositionSelectByTicket(g_posTicket1))
+      {
+         //--- Position no longer exists — it was closed
+         //--- Check deal history to find out why and what the profit was
+         string reason = "";
+         double profit = 0;
+         double closePrice = 0;
+
+         if(FindCloseDeal(g_posTicket1, reason, profit, closePrice))
+         {
+            Print("TP1 position #", g_posTicket1, " closed: reason=", reason,
+                  " profit=", DoubleToString(profit, 2), " price=", DoubleToString(closePrice, g_digits));
+            SendCloseReport(g_posTradeId, g_posTicket1, closePrice, reason, profit);
+         }
+         else
+         {
+            Print("TP1 position #", g_posTicket1, " closed (could not determine reason)");
+            SendCloseReport(g_posTradeId, g_posTicket1, 0, "unknown", 0);
+         }
+
+         g_posTicket1 = 0;
+      }
+   }
+
+   //--- Check TP2 position
+   if(g_posTicket2 > 0)
+   {
+      if(!PositionSelectByTicket(g_posTicket2))
+      {
+         string reason = "";
+         double profit = 0;
+         double closePrice = 0;
+
+         if(FindCloseDeal(g_posTicket2, reason, profit, closePrice))
+         {
+            Print("TP2 position #", g_posTicket2, " closed: reason=", reason,
+                  " profit=", DoubleToString(profit, 2), " price=", DoubleToString(closePrice, g_digits));
+            SendCloseReport(g_posTradeId, g_posTicket2, closePrice, reason, profit);
+         }
+         else
+         {
+            Print("TP2 position #", g_posTicket2, " closed (could not determine reason)");
+            SendCloseReport(g_posTradeId, g_posTicket2, 0, "unknown", 0);
+         }
+
+         g_posTicket2 = 0;
+      }
+   }
+
+   //--- If both positions closed, clear tracking
+   if(g_posTicket1 == 0 && g_posTicket2 == 0)
+      g_posTradeId = "";
+}
+
+//+------------------------------------------------------------------+
+//| Find the closing deal for a position and determine TP/SL/manual    |
+//+------------------------------------------------------------------+
+bool FindCloseDeal(ulong posTicket, string &reason, double &profit, double &closePrice)
+{
+   //--- Request recent deal history (last 24 hours)
+   datetime from = TimeCurrent() - 86400;
+   datetime to   = TimeCurrent() + 60;
+
+   if(!HistorySelect(from, to))
+      return false;
+
+   int totalDeals = HistoryDealsTotal();
+
+   for(int i = totalDeals - 1; i >= 0; i--)
+   {
+      ulong dealTicket = HistoryDealGetTicket(i);
+      if(dealTicket == 0) continue;
+
+      //--- Check if this deal closed our position
+      ulong dealPos = HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID);
+      long dealEntry = HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
+
+      if(dealPos == posTicket && dealEntry == DEAL_ENTRY_OUT)
+      {
+         profit     = HistoryDealGetDouble(dealTicket, DEAL_PROFIT)
+                    + HistoryDealGetDouble(dealTicket, DEAL_SWAP)
+                    + HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
+         closePrice = HistoryDealGetDouble(dealTicket, DEAL_PRICE);
+
+         //--- Determine reason from deal comment
+         string comment = HistoryDealGetString(dealTicket, DEAL_COMMENT);
+         long dealReason = HistoryDealGetInteger(dealTicket, DEAL_REASON);
+
+         if(StringFind(comment, "tp") >= 0 || StringFind(comment, "TP") >= 0
+            || dealReason == DEAL_REASON_TP)
+         {
+            //--- Determine if TP1 or TP2 from our original order comment
+            string origComment = HistoryDealGetString(dealTicket, DEAL_COMMENT);
+            if(StringFind(origComment, "_TP1") >= 0)
+               reason = "tp1";
+            else if(StringFind(origComment, "_TP2") >= 0)
+               reason = "tp2";
+            else
+               reason = "tp1";  // default to tp1 for first position
+         }
+         else if(StringFind(comment, "sl") >= 0 || StringFind(comment, "SL") >= 0
+                 || dealReason == DEAL_REASON_SL)
+         {
+            reason = "sl";
+         }
+         else
+         {
+            reason = "manual";
+         }
+
+         return true;
+      }
+   }
+
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Send close report to server                                        |
+//+------------------------------------------------------------------+
+void SendCloseReport(string tradeId, ulong ticket, double closePrice,
+                     string reason, double profit)
+{
+   string url = InpServerBase + "/trade_closed";
+
+   string json = "{";
+   json += "\"trade_id\":\"" + tradeId + "\",";
+   json += "\"symbol\":\"" + _Symbol + "\",";
+   json += "\"ticket\":" + IntegerToString(ticket) + ",";
+   json += "\"close_price\":" + DoubleToString(closePrice, g_digits) + ",";
+   json += "\"close_reason\":\"" + reason + "\",";
+   json += "\"profit\":" + DoubleToString(profit, 2);
+   json += "}";
+
+   char postData[];
+   StringToCharArray(json, postData, 0, WHOLE_ARRAY, CP_UTF8);
+   ArrayResize(postData, ArraySize(postData) - 1);
+
+   char   result[];
+   string resultHeaders;
+   string headers = "Content-Type: application/json\r\n";
+
+   int res = WebRequest("POST", url, headers, 10000, postData, result, resultHeaders);
+   if(res == 200)
+      Print(_Symbol, " close report sent: ", reason, " profit=", DoubleToString(profit, 2));
+   else
+      Print("WARNING: Failed to send close report (HTTP ", res, ")");
 }
 
 //+------------------------------------------------------------------+
@@ -936,6 +1137,12 @@ void ExecuteTrade(string tradeId, string bias, double entryMin, double entryMax,
       Print("TP2 MARKET order filled: ticket=", ticket2, " entry=", DoubleToString(actualEntry2, g_digits));
 
       Print("=== ", _Symbol, " MARKET orders filled: ", bias, " ", DoubleToString(lotsTP1 + lotsTP2, 2), " lots ===");
+
+      //--- Track positions for close detection
+      g_posTicket1 = ticket1;
+      g_posTicket2 = ticket2;
+      g_posTradeId = tradeId;
+
       SendExecutionReport(tradeId, (int)ticket1, (int)ticket2, lotsTP1, lotsTP2,
                           actualEntry, stopLoss, tp1, tp2, "executed", "");
    }

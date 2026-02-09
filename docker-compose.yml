@@ -1,7 +1,7 @@
 services:
-  gbpjpy-analyst:
+  ai-analyst:
     build: .
-    container_name: gbpjpy-analyst
+    container_name: ai-analyst
     restart: unless-stopped
     ports:
       - "8000:8000"
@@ -9,6 +9,7 @@ services:
       - server/.env
     volumes:
       - ./logs:/app/logs
+      - ./data:/data
     logging:
       driver: "json-file"
       options:

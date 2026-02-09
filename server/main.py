@@ -10,6 +10,7 @@ from typing import Optional
 import uvicorn
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 import config
 from analyzer import analyze_charts
@@ -23,6 +24,7 @@ from telegram_bot import (
     set_scan_callback,
     store_analysis,
 )
+from trade_tracker import init_db, log_trade_executed, log_trade_closed, get_stats as get_trade_stats
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -116,6 +118,7 @@ async def _run_analysis(
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting AI Trade Analyst server on %s:%s", config.HOST, config.PORT)
+    init_db()
     try:
         bot_app = create_bot_app()
         set_scan_callback(_run_scan_from_telegram)
@@ -163,6 +166,12 @@ async def health():
         "pending_trades": list(_pending_trades.keys()),
         "setups": {s: len(r.setups) for s, r in _last_results.items()},
     }
+
+
+@app.get("/stats")
+async def stats(symbol: str = "", days: int = 30):
+    """Performance statistics endpoint."""
+    return get_trade_stats(symbol=symbol or None, days=days)
 
 
 @app.post("/analyze")
@@ -268,6 +277,21 @@ async def trade_executed(report: TradeExecutionReport):
     )
     clear_pending_trade(report.symbol)
 
+    # Log to performance tracker
+    try:
+        log_trade_executed(
+            trade_id=report.trade_id,
+            status=report.status,
+            actual_entry=report.actual_entry,
+            ticket_tp1=report.ticket_tp1,
+            ticket_tp2=report.ticket_tp2,
+            lots_tp1=report.lots_tp1,
+            lots_tp2=report.lots_tp2,
+            error_message=report.error_message,
+        )
+    except Exception as e:
+        logger.error("[%s] Failed to log trade execution: %s", report.symbol, e)
+
     try:
         await send_trade_confirmation(report)
         logger.info("[%s] Trade confirmation sent to Telegram", report.symbol)
@@ -275,6 +299,45 @@ async def trade_executed(report: TradeExecutionReport):
         logger.error("[%s] Failed to send trade confirmation: %s", report.symbol, e)
 
     return {"status": "ok", "message": "Execution report received"}
+
+
+class TradeCloseReport(BaseModel):
+    """Report from MT5 EA when a position is closed (TP/SL hit)."""
+    trade_id: str
+    symbol: str = ""
+    ticket: int = 0
+    close_price: float = 0
+    close_reason: str = ""     # "tp1", "tp2", "sl", "manual", "cancelled"
+    profit: float = 0          # monetary P&L
+
+
+@app.post("/trade_closed")
+async def trade_closed(report: TradeCloseReport):
+    """MT5 EA calls this when a position is closed (TP/SL hit)."""
+    logger.info(
+        "[%s] Trade close report: id=%s reason=%s profit=%.2f",
+        report.symbol, report.trade_id, report.close_reason, report.profit,
+    )
+
+    try:
+        log_trade_closed(
+            trade_id=report.trade_id,
+            ticket=report.ticket,
+            close_price=report.close_price,
+            close_reason=report.close_reason,
+            profit=report.profit,
+        )
+    except Exception as e:
+        logger.error("[%s] Failed to log trade close: %s", report.symbol, e)
+
+    # Notify via Telegram
+    try:
+        from telegram_bot import send_trade_close_notification
+        await send_trade_close_notification(report)
+    except Exception as e:
+        logger.error("[%s] Failed to send close notification: %s", report.symbol, e)
+
+    return {"status": "ok", "message": "Close report received"}
 
 
 @app.post("/webhook/telegram")

@@ -17,6 +17,7 @@ from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 from models import AnalysisResult, PendingTrade, TradeExecutionReport, TradeSetup
 from news_filter import check_news_restriction, get_upcoming_news
 from pair_profiles import get_profile
+from trade_tracker import log_trade_queued, get_stats, get_recent_trades
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +245,30 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             if _trade_queue_callback:
                 _trade_queue_callback(pending)
+
+                # Log to performance tracker
+                try:
+                    log_trade_queued(
+                        trade_id=trade_id,
+                        symbol=symbol,
+                        bias=setup.bias,
+                        entry_min=setup.entry_min,
+                        entry_max=setup.entry_max,
+                        stop_loss=setup.stop_loss,
+                        tp1=setup.tp1,
+                        tp2=setup.tp2,
+                        sl_pips=setup.sl_pips,
+                        confidence=setup.confidence,
+                        tp1_pips=setup.tp1_pips,
+                        tp2_pips=setup.tp2_pips,
+                        rr_tp1=setup.rr_tp1,
+                        rr_tp2=setup.rr_tp2,
+                        h1_trend=setup.h1_trend,
+                        counter_trend=setup.counter_trend,
+                    )
+                except Exception as e:
+                    logger.error("Failed to log trade: %s", e)
+
                 direction = "LONG" if setup.bias == "long" else "SHORT"
 
                 news_warn = ""
@@ -346,6 +371,95 @@ async def _cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+async def _cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /stats command. Usage: /stats or /stats GBPJPY or /stats 7"""
+    chat_id = str(update.effective_chat.id)
+    if TELEGRAM_CHAT_ID and chat_id != TELEGRAM_CHAT_ID:
+        await update.message.reply_text("Unauthorized.")
+        return
+
+    # Parse arguments: /stats, /stats GBPJPY, /stats 7, /stats GBPJPY 7
+    symbol = None
+    days = 30
+
+    if context.args:
+        for arg in context.args:
+            if arg.isdigit():
+                days = int(arg)
+            else:
+                symbol = arg.upper()
+
+    stats = get_stats(symbol=symbol, days=days)
+
+    if stats.get("total_trades", 0) == 0:
+        await update.message.reply_text(
+            f"\U0001f4ca No trades in the last {days} days"
+            + (f" for {symbol}" if symbol else "")
+            + ".\nTrades are logged when you press Execute."
+        )
+        return
+
+    s = stats
+    pnl_emoji = "\U0001f7e2" if s["total_pnl_pips"] >= 0 else "\U0001f534"
+
+    lines = [
+        f"\U0001f4ca Performance — {s['symbol']} ({s['period_days']}d)",
+        "\u2501" * 25,
+        "",
+        f"Trades: {s['closed_trades']} closed | {s['open_trades']} open | {s['failed_trades']} failed",
+        f"\u2705 Wins: {s['wins']} ({s['full_wins']} full + {s['partial_wins']} partial)",
+        f"\u274c Losses: {s['losses']}",
+        f"\U0001f3af Win Rate: {s['win_rate']:.0f}%",
+        "",
+        f"{pnl_emoji} P&L: {s['total_pnl_pips']:+.1f} pips | ${s['total_pnl_money']:+.2f}",
+        f"\U0001f4c8 Avg Win: {s['avg_win_pips']:+.1f} pips",
+        f"\U0001f4c9 Avg Loss: {s['avg_loss_pips']:.1f} pips",
+    ]
+
+    # Per-pair breakdown
+    if s.get("pair_stats") and len(s["pair_stats"]) > 1:
+        lines += ["", "\U0001f4b1 Per Pair:"]
+        for sym, ps in s["pair_stats"].items():
+            wr = f"{ps['win_rate']:.0f}%" if ps["closed"] else "n/a"
+            lines.append(f"  {sym}: {ps['wins']}/{ps['closed']}W ({wr}) | {ps['pnl_pips']:+.1f} pips")
+
+    # Per-confidence breakdown
+    if s.get("confidence_stats"):
+        lines += ["", "\U0001f525 By Confidence:"]
+        for conf, cs in s["confidence_stats"].items():
+            lines.append(f"  {conf.upper()}: {cs['wins']}/{cs['total']}W ({cs['win_rate']:.0f}%)")
+
+    # Per-session breakdown
+    if s.get("session_stats"):
+        lines += ["", "\U0001f553 By Session:"]
+        for sess, ss in s["session_stats"].items():
+            lines.append(f"  {sess}: {ss['wins']}/{ss['total']}W ({ss['win_rate']:.0f}%)")
+
+    # Recent trades
+    recent = get_recent_trades(limit=5, symbol=symbol)
+    if recent:
+        lines += ["", "Recent trades:"]
+        for t in recent:
+            outcome_emoji = {
+                "full_win": "\u2705",
+                "partial_win": "\U0001f7e1",
+                "loss": "\u274c",
+                "open": "\u23f3",
+                "cancelled": "\u2796",
+                "failed": "\u26a0\ufe0f",
+            }.get(t.get("outcome", ""), "\u2753")
+            date_str = t.get("created_at", "")[:10]
+            pnl = t.get("pnl_pips") or 0
+            lines.append(
+                f"  {outcome_emoji} {t['symbol']} {t['bias'].upper()} "
+                f"({t.get('confidence', '?')}) {pnl:+.0f}p — {date_str}"
+            )
+
+    lines += ["", f"Usage: /stats [SYMBOL] [DAYS]"]
+
+    await update.message.reply_text("\n".join(lines))
+
+
 async def _cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /news command. Shows upcoming high-impact news for tracked pairs."""
     chat_id = str(update.effective_chat.id)
@@ -387,6 +501,7 @@ async def _cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         + "\n\n"
         "Commands:\n"
         "/scan - Re-scan last pair or /scan GBPJPY\n"
+        "/stats - Performance stats or /stats GBPJPY 7\n"
         "/news - Show upcoming high-impact news events\n"
         "/status - Show bot status for all pairs\n"
         "/help - Show this help message\n\n"
@@ -459,6 +574,42 @@ async def send_trade_confirmation(report: TradeExecutionReport):
         logger.error("Failed to send trade confirmation: %s", e)
 
 
+async def send_trade_close_notification(report):
+    """Send notification when a position closes (TP/SL hit)."""
+    if not _app:
+        return
+
+    chat_id = TELEGRAM_CHAT_ID
+    if not chat_id:
+        return
+
+    symbol = report.symbol or "UNKNOWN"
+    reason = report.close_reason or "unknown"
+
+    reason_emoji = {
+        "tp1": "\U0001f3af",
+        "tp2": "\U0001f3af\U0001f3af",
+        "sl": "\U0001f534",
+        "manual": "\u270b",
+        "cancelled": "\u2796",
+    }.get(reason, "\u2753")
+
+    pnl_emoji = "\U0001f7e2" if report.profit >= 0 else "\U0001f534"
+
+    msg = (
+        f"{reason_emoji} {symbol} Position Closed — {reason.upper()}\n"
+        f"\u2501" * 20 + "\n"
+        f"\U0001f194 Trade: {report.trade_id}\n"
+        f"\U0001f4b0 Close: {report.close_price}\n"
+        f"{pnl_emoji} Profit: ${report.profit:+.2f}\n"
+    )
+
+    try:
+        await _app.bot.send_message(chat_id=chat_id, text=msg)
+    except Exception as e:
+        logger.error("Failed to send close notification: %s", e)
+
+
 def create_bot_app() -> Application:
     """Create and configure the Telegram bot application."""
     global _app
@@ -471,6 +622,7 @@ def create_bot_app() -> Application:
 
     _app.add_handler(CommandHandler("start", _cmd_start))
     _app.add_handler(CommandHandler("scan", _cmd_scan))
+    _app.add_handler(CommandHandler("stats", _cmd_stats))
     _app.add_handler(CommandHandler("news", _cmd_news))
     _app.add_handler(CommandHandler("status", _cmd_status))
     _app.add_handler(CommandHandler("help", _cmd_help))
