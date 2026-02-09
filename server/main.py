@@ -237,9 +237,13 @@ async def manual_scan():
 
 @app.get("/pending_trade")
 async def pending_trade():
-    """MT5 EA polls this to check for trades to execute."""
+    """MT5 EA polls this to check for trades to execute.
+    Returns the trade and immediately clears it (consume-on-read)
+    to prevent duplicate execution."""
     trade = get_pending_trade()
     if trade:
+        clear_pending_trade()  # Clear immediately so next poll returns empty
+        logger.info("Pending trade consumed by MT5: %s", trade.id)
         return {"pending": True, "trade": trade.model_dump()}
     return {"pending": False}
 

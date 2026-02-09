@@ -33,6 +33,7 @@ bool     g_nyScanned     = false;
 int      g_lastDay       = 0;
 string   g_screenshotDir;
 datetime g_lastPollTime  = 0;
+string   g_lastTradeId   = "";  // Prevent re-executing the same trade
 
 //--- Trade object
 CTrade g_trade;
@@ -605,11 +606,15 @@ void PollPendingTrade()
       StringFind(response, "\"pending\":true") < 0)
       return;
 
+   //--- Parse trade ID first for duplicate check
+   string tradeId    = JsonGetString(response, "id");
+
+   //--- Skip if we already executed this trade
+   if(tradeId == g_lastTradeId && tradeId != "")
+      return;
+
    Print("=== Pending trade found! ===");
    Print("Trade data: ", response);
-
-   //--- Parse trade fields from JSON
-   string tradeId    = JsonGetString(response, "id");
    string bias       = JsonGetString(response, "bias");
    double entryMin   = JsonGetDouble(response, "entry_min");
    double entryMax   = JsonGetDouble(response, "entry_max");
@@ -630,11 +635,17 @@ void PollPendingTrade()
 
 //+------------------------------------------------------------------+
 //| Execute trade with split lots (50% TP1, 50% TP2)                   |
+//| Uses LIMIT orders when price is outside entry zone                 |
+//| Uses MARKET orders when price is already in the zone               |
 //+------------------------------------------------------------------+
 void ExecuteTrade(string tradeId, string bias, double entryMin, double entryMax,
                   double stopLoss, double tp1, double tp2, double slPips)
 {
-   Print("Executing trade: ", bias, " ID=", tradeId);
+   Print("Executing trade: ", bias, " ID=", tradeId,
+         " entry_zone=", DoubleToString(entryMin, 3), "-", DoubleToString(entryMax, 3));
+
+   //--- Mark this trade as processed
+   g_lastTradeId = tradeId;
 
    //--- Calculate lot size based on risk
    double totalLots = CalculateLotSize(slPips);
@@ -653,11 +664,8 @@ void ExecuteTrade(string tradeId, string bias, double entryMin, double entryMax,
    double lotsTP1 = MathFloor((totalLots * 0.5) / lotStep) * lotStep;
    double lotsTP2 = MathFloor((totalLots * 0.5) / lotStep) * lotStep;
 
-   //--- Ensure minimum lot size
    if(lotsTP1 < minLot) lotsTP1 = minLot;
    if(lotsTP2 < minLot) lotsTP2 = minLot;
-
-   //--- Cap at max
    if(lotsTP1 > maxLot) lotsTP1 = maxLot;
    if(lotsTP2 > maxLot) lotsTP2 = maxLot;
 
@@ -665,63 +673,161 @@ void ExecuteTrade(string tradeId, string bias, double entryMin, double entryMax,
          " TP1=", DoubleToString(lotsTP1, 2),
          " TP2=", DoubleToString(lotsTP2, 2));
 
-   //--- Place orders
-   ENUM_ORDER_TYPE orderType;
-   double price;
+   //--- Determine current price
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double entryMid = NormalizeDouble((entryMin + entryMax) / 2.0, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
+
+   //--- Decide: market order or limit order
+   bool useLimit = false;
 
    if(bias == "long")
    {
-      orderType = ORDER_TYPE_BUY;
-      price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      //--- LONG: want to buy when price drops INTO the entry zone
+      //--- If ask is above entry zone → place BUY LIMIT at entry_min (wait for pullback)
+      //--- If ask is in or below zone → market buy now
+      if(ask > entryMax)
+      {
+         useLimit = true;
+         Print("Price ", DoubleToString(ask, 3), " is ABOVE entry zone — placing BUY LIMIT at ", DoubleToString(entryMin, 3));
+      }
+      else
+      {
+         Print("Price ", DoubleToString(ask, 3), " is in/below entry zone — executing MARKET BUY");
+      }
+   }
+   else // short
+   {
+      //--- SHORT: want to sell when price rises INTO the entry zone
+      //--- If bid is below entry zone → place SELL LIMIT at entry_max (wait for retracement)
+      //--- If bid is in or above zone → market sell now
+      if(bid < entryMin)
+      {
+         useLimit = true;
+         Print("Price ", DoubleToString(bid, 3), " is BELOW entry zone — placing SELL LIMIT at ", DoubleToString(entryMax, 3));
+      }
+      else
+      {
+         Print("Price ", DoubleToString(bid, 3), " is in/above entry zone — executing MARKET SELL");
+      }
+   }
+
+   bool ok1, ok2;
+   ulong ticket1 = 0, ticket2 = 0;
+   double actualEntry = 0;
+
+   if(useLimit)
+   {
+      //--- Place LIMIT orders (pending — will fill when price reaches entry zone)
+      double limitPrice;
+      ENUM_ORDER_TYPE limitType;
+
+      if(bias == "long")
+      {
+         limitType = ORDER_TYPE_BUY_LIMIT;
+         limitPrice = entryMin;  // Buy at bottom of entry zone
+      }
+      else
+      {
+         limitType = ORDER_TYPE_SELL_LIMIT;
+         limitPrice = entryMax;  // Sell at top of entry zone
+      }
+
+      limitPrice = NormalizeDouble(limitPrice, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
+
+      //--- Order 1: TP1 (close 50%)
+      string comment1 = "AI_" + tradeId + "_TP1";
+      ok1 = g_trade.OrderOpen(_Symbol, limitType, lotsTP1, 0, limitPrice, stopLoss, tp1,
+                               ORDER_TIME_GTC, 0, comment1);
+      ticket1 = ok1 ? g_trade.ResultOrder() : 0;
+
+      if(!ok1)
+      {
+         Print("ERROR: TP1 limit order failed: ", g_trade.ResultRetcodeDescription());
+         SendExecutionReport(tradeId, 0, 0, 0, 0, 0, 0, 0, 0, "failed",
+                             "TP1 limit failed: " + g_trade.ResultRetcodeDescription());
+         return;
+      }
+      Print("TP1 LIMIT order placed: ticket=", ticket1, " at ", DoubleToString(limitPrice, 3));
+
+      //--- Order 2: TP2 (runner 50%)
+      string comment2 = "AI_" + tradeId + "_TP2";
+      ok2 = g_trade.OrderOpen(_Symbol, limitType, lotsTP2, 0, limitPrice, stopLoss, tp2,
+                               ORDER_TIME_GTC, 0, comment2);
+      ticket2 = ok2 ? g_trade.ResultOrder() : 0;
+
+      if(!ok2)
+      {
+         Print("WARNING: TP2 limit order failed: ", g_trade.ResultRetcodeDescription());
+         SendExecutionReport(tradeId, (int)ticket1, 0, lotsTP1, 0,
+                             limitPrice, stopLoss, tp1, 0, "executed",
+                             "TP2 limit failed: " + g_trade.ResultRetcodeDescription());
+         return;
+      }
+      Print("TP2 LIMIT order placed: ticket=", ticket2, " at ", DoubleToString(limitPrice, 3));
+
+      Print("=== LIMIT orders placed: ", bias, " ", DoubleToString(lotsTP1 + lotsTP2, 2),
+            " lots at ", DoubleToString(limitPrice, 3), " ===");
+      SendExecutionReport(tradeId, (int)ticket1, (int)ticket2, lotsTP1, lotsTP2,
+                          limitPrice, stopLoss, tp1, tp2, "pending", "");
    }
    else
    {
-      orderType = ORDER_TYPE_SELL;
-      price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      //--- Place MARKET orders (price is already in the entry zone)
+      ENUM_ORDER_TYPE orderType;
+      double price;
+
+      if(bias == "long")
+      {
+         orderType = ORDER_TYPE_BUY;
+         price = ask;
+      }
+      else
+      {
+         orderType = ORDER_TYPE_SELL;
+         price = bid;
+      }
+
+      //--- Position 1: TP1 (close 50%)
+      string comment1 = "AI_" + tradeId + "_TP1";
+      ok1 = g_trade.PositionOpen(_Symbol, orderType, lotsTP1, price, stopLoss, tp1, comment1);
+      ticket1 = ok1 ? g_trade.ResultOrder() : 0;
+      actualEntry = ok1 ? g_trade.ResultPrice() : 0;
+
+      if(!ok1)
+      {
+         Print("ERROR: TP1 market order failed: ", g_trade.ResultRetcodeDescription());
+         SendExecutionReport(tradeId, 0, 0, 0, 0, 0, 0, 0, 0, "failed",
+                             "TP1 market failed: " + g_trade.ResultRetcodeDescription());
+         return;
+      }
+      Print("TP1 MARKET order filled: ticket=", ticket1, " entry=", DoubleToString(actualEntry, 3));
+
+      //--- Position 2: TP2 (runner 50%)
+      if(bias == "long")
+         price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      else
+         price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+      string comment2 = "AI_" + tradeId + "_TP2";
+      ok2 = g_trade.PositionOpen(_Symbol, orderType, lotsTP2, price, stopLoss, tp2, comment2);
+      ticket2 = ok2 ? g_trade.ResultOrder() : 0;
+      double actualEntry2 = ok2 ? g_trade.ResultPrice() : 0;
+
+      if(!ok2)
+      {
+         Print("WARNING: TP2 market order failed: ", g_trade.ResultRetcodeDescription());
+         SendExecutionReport(tradeId, (int)ticket1, 0, lotsTP1, 0,
+                             actualEntry, stopLoss, tp1, 0, "executed",
+                             "TP2 market failed: " + g_trade.ResultRetcodeDescription());
+         return;
+      }
+      Print("TP2 MARKET order filled: ticket=", ticket2, " entry=", DoubleToString(actualEntry2, 3));
+
+      Print("=== MARKET orders filled: ", bias, " ", DoubleToString(lotsTP1 + lotsTP2, 2), " lots ===");
+      SendExecutionReport(tradeId, (int)ticket1, (int)ticket2, lotsTP1, lotsTP2,
+                          actualEntry, stopLoss, tp1, tp2, "executed", "");
    }
-
-   //--- Position 1: TP1 (close 50%)
-   string comment1 = "AI_" + tradeId + "_TP1";
-   bool ok1 = g_trade.PositionOpen(_Symbol, orderType, lotsTP1, price, stopLoss, tp1, comment1);
-   ulong ticket1 = ok1 ? g_trade.ResultOrder() : 0;
-   double actualEntry1 = ok1 ? g_trade.ResultPrice() : 0;
-
-   if(!ok1)
-   {
-      Print("ERROR: TP1 order failed: ", g_trade.ResultRetcodeDescription());
-      SendExecutionReport(tradeId, 0, 0, 0, 0, 0, 0, 0, 0, "failed",
-                          "TP1 order failed: " + g_trade.ResultRetcodeDescription());
-      return;
-   }
-   Print("TP1 order placed: ticket=", ticket1, " lots=", lotsTP1, " entry=", actualEntry1);
-
-   //--- Position 2: TP2 (runner 50%)
-   //--- Re-fetch price in case of slight movement
-   if(bias == "long")
-      price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   else
-      price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-
-   string comment2 = "AI_" + tradeId + "_TP2";
-   bool ok2 = g_trade.PositionOpen(_Symbol, orderType, lotsTP2, price, stopLoss, tp2, comment2);
-   ulong ticket2 = ok2 ? g_trade.ResultOrder() : 0;
-   double actualEntry2 = ok2 ? g_trade.ResultPrice() : 0;
-
-   if(!ok2)
-   {
-      Print("WARNING: TP2 order failed: ", g_trade.ResultRetcodeDescription());
-      // TP1 was placed, report partial execution
-      SendExecutionReport(tradeId, (int)ticket1, 0, lotsTP1, 0,
-                          actualEntry1, stopLoss, tp1, 0, "executed",
-                          "TP2 failed: " + g_trade.ResultRetcodeDescription());
-      return;
-   }
-   Print("TP2 order placed: ticket=", ticket2, " lots=", lotsTP2, " entry=", actualEntry2);
-
-   //--- Both positions placed successfully
-   Print("=== Trade fully executed: ", bias, " ", DoubleToString(lotsTP1 + lotsTP2, 2), " lots ===");
-   SendExecutionReport(tradeId, (int)ticket1, (int)ticket2, lotsTP1, lotsTP2,
-                       actualEntry1, stopLoss, tp1, tp2, "executed", "");
 }
 
 //+------------------------------------------------------------------+

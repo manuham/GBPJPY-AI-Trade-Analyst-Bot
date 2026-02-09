@@ -304,7 +304,19 @@ async def send_trade_confirmation(report: TradeExecutionReport):
     if not chat_id:
         return
 
-    if report.status == "executed":
+    if report.status == "pending":
+        # Limit orders placed — waiting for price to reach entry zone
+        msg = (
+            f"\u23f3 Limit Orders Placed on MT5!\n"
+            f"\u2501" * 20 + "\n"
+            f"\U0001f194 Trade ID: {report.trade_id}\n"
+            f"\U0001f4cd Limit Entry: {report.actual_entry:.3f}\n"
+            f"\U0001f534 SL: {report.actual_sl:.3f}\n"
+            f"\U0001f3af TP1: {report.actual_tp1:.3f} ({report.lots_tp1:.2f} lots) — order #{report.ticket_tp1}\n"
+            f"\U0001f3af TP2: {report.actual_tp2:.3f} ({report.lots_tp2:.2f} lots) — order #{report.ticket_tp2}\n\n"
+            f"Waiting for price to reach entry zone..."
+        )
+    elif report.status == "executed":
         msg = (
             f"\u2705 Trade Executed on MT5!\n"
             f"\u2501" * 20 + "\n"
