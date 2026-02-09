@@ -60,6 +60,23 @@ def _format_setup_message(setup: TradeSetup, summary: str) -> str:
     lines = [
         f"{direction_emoji} GBPJPY {direction_label} Setup ({tf_label})",
         "\u2501" * 20,
+    ]
+
+    # Show H1 trend and price zone context
+    if setup.h1_trend:
+        trend_emoji = {
+            "bullish": "\U0001f7e2",
+            "bearish": "\U0001f534",
+            "ranging": "\u2194\ufe0f",
+        }.get(setup.h1_trend, "")
+        lines.append(f"{trend_emoji} H1 Trend: {setup.h1_trend.upper()}")
+    if setup.price_zone:
+        lines.append(f"\U0001f4cd Zone: {setup.price_zone.upper()}")
+    if setup.counter_trend:
+        lines.append("\u26a0\ufe0f COUNTER-TREND TRADE")
+
+    lines += [
+        "",
         f"\U0001f4cd Entry: {setup.entry_min:.3f} - {setup.entry_max:.3f}",
         f"\U0001f534 SL: {setup.stop_loss:.3f} ({setup.sl_pips:.0f} pips)",
         f"\U0001f3af TP1: {setup.tp1:.3f} ({setup.tp1_pips:.0f} pips) \u2014 close 50%",
@@ -103,8 +120,10 @@ async def send_analysis(result: AnalysisResult):
             + "\u2501" * 20
             + "\n\n"
             + "\u274c No valid trade setups identified.\n\n"
-            + f"\U0001f4cb {result.market_summary}\n\n"
         )
+        if result.h1_trend_analysis:
+            msg += f"\U0001f4c8 H1 Trend: {result.h1_trend_analysis}\n\n"
+        msg += f"\U0001f4cb {result.market_summary}\n\n"
         if result.primary_scenario:
             msg += f"\U0001f4c8 Primary: {result.primary_scenario}\n"
         if result.alternative_scenario:

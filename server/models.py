@@ -49,10 +49,14 @@ class TradeSetup(BaseModel):
     timeframe_type: str
     confidence: str
     news_warning: Optional[str] = None
+    counter_trend: bool = False
+    h1_trend: str = ""
+    price_zone: str = ""
 
 
 class AnalysisResult(BaseModel):
     setups: list[TradeSetup] = []
+    h1_trend_analysis: str = ""
     market_summary: str = ""
     primary_scenario: str = ""
     alternative_scenario: str = ""
