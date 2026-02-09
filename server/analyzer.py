@@ -209,7 +209,7 @@ async def analyze_charts(
     try:
         logger.info("Sending analysis request to Claude API...")
         response = await client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-opus-4-20250514",
             max_tokens=4096,
             system=SYSTEM_PROMPT,
             tools=[
