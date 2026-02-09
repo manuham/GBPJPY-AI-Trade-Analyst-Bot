@@ -79,6 +79,7 @@ class PendingTrade(BaseModel):
     tp2: float
     sl_pips: float
     confidence: str
+    queued_at: float = 0.0  # Unix timestamp — for multi-consumer expiry (60s window)
 
 
 class TradeExecutionReport(BaseModel):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -47,15 +48,27 @@ _analysis_lock = asyncio.Lock()
 _pending_trades: dict[str, PendingTrade] = {}           # {"GBPJPY": PendingTrade(...)}
 
 
+# Trade expiry window — all EAs (leader + followers) have this long to pick up a trade
+PENDING_TRADE_TTL_SECONDS = 60
+
+
 def queue_pending_trade(trade: PendingTrade):
     """Called by telegram_bot when Execute is pressed."""
+    trade.queued_at = time.time()
     _pending_trades[trade.symbol] = trade
-    logger.info("[%s] Trade queued for MT5: %s %s", trade.symbol, trade.bias.upper(), trade.id)
+    logger.info("[%s] Trade queued for MT5: %s %s (TTL=%ds)", trade.symbol, trade.bias.upper(), trade.id, PENDING_TRADE_TTL_SECONDS)
 
 
 def get_pending_trade(symbol: str) -> Optional[PendingTrade]:
-    """Return current pending trade for symbol (or None)."""
-    return _pending_trades.get(symbol)
+    """Return current pending trade for symbol (or None).
+    Auto-expires trades older than PENDING_TRADE_TTL_SECONDS."""
+    trade = _pending_trades.get(symbol)
+    if trade and trade.queued_at > 0:
+        if time.time() - trade.queued_at > PENDING_TRADE_TTL_SECONDS:
+            logger.info("[%s] Pending trade %s expired (>%ds)", symbol, trade.id, PENDING_TRADE_TTL_SECONDS)
+            _pending_trades.pop(symbol, None)
+            return None
+    return trade
 
 
 def clear_pending_trade(symbol: str):
@@ -160,10 +173,17 @@ app = FastAPI(
 
 @app.get("/health")
 async def health():
+    # Show pending trades with remaining TTL
+    pending_info = {}
+    for s, t in _pending_trades.items():
+        age = int(time.time() - t.queued_at) if t.queued_at else 0
+        remaining = max(0, PENDING_TRADE_TTL_SECONDS - age)
+        pending_info[s] = {"trade_id": t.id, "ttl_remaining": remaining}
+
     return {
         "status": "ok",
         "pairs_analyzed": list(_last_results.keys()),
-        "pending_trades": list(_pending_trades.keys()),
+        "pending_trades": pending_info,
         "setups": {s: len(r.setups) for s, r in _last_results.items()},
     }
 
@@ -257,25 +277,28 @@ async def manual_scan(symbol: str = ""):
 @app.get("/pending_trade")
 async def pending_trade(symbol: str = ""):
     """MT5 EA polls this to check for trades to execute.
-    Returns the trade and immediately clears it (consume-on-read)."""
+    Leader/follower mode: trade stays available for 60 seconds so all
+    EAs (leader + followers) can pick it up. Each EA's g_lastTradeId
+    prevents duplicate execution on the same account."""
     trade = get_pending_trade(symbol)
     if trade:
-        clear_pending_trade(symbol)
-        logger.info("[%s] Pending trade consumed by MT5: %s", symbol, trade.id)
+        age = int(time.time() - trade.queued_at) if trade.queued_at else 0
+        logger.info("[%s] Pending trade served: %s (age=%ds/%ds)", symbol, trade.id, age, PENDING_TRADE_TTL_SECONDS)
         return {"pending": True, "trade": trade.model_dump()}
     return {"pending": False}
 
 
 @app.post("/trade_executed")
 async def trade_executed(report: TradeExecutionReport):
-    """MT5 EA calls this after placing a trade."""
+    """MT5 EA calls this after placing a trade.
+    Note: does NOT clear the pending trade — TTL handles expiry so all
+    EAs (leader + followers) can pick up the same trade within 60s."""
     logger.info(
         "[%s] Trade execution report: id=%s status=%s",
         report.symbol,
         report.trade_id,
         report.status,
     )
-    clear_pending_trade(report.symbol)
 
     # Log to performance tracker
     try:

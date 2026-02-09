@@ -1,12 +1,12 @@
 //+------------------------------------------------------------------+
 //|                                                  AI_Analyst.mq5  |
-//|                         AI Trade Analyst Bot — Multi-Pair          |
-//|                         Sends chart screenshots + market data     |
-//|                         to FastAPI server for Claude analysis      |
+//|                   AI Trade Analyst Bot — Leader/Follower           |
+//|                   Leader: screenshots + analysis + trade           |
+//|                   Follower: polls + trades only (copy trades)      |
 //+------------------------------------------------------------------+
 #property copyright "AI Trade Analyst Bot"
 #property link      ""
-#property version   "3.00"
+#property version   "4.00"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -27,6 +27,8 @@ input double   InpRiskPercent     = 1.0;    // Risk % per trade
 input int      InpMagicNumber     = 888888; // Magic Number for trades
 input int      InpLondonEndHour   = 17;     // London session end (CET hour, cancels limit orders)
 input int      InpNYEndHour       = 22;     // NY session end (CET hour, cancels limit orders)
+input string   InpMode            = "leader";  // Mode: "leader" (analyze+trade) or "follower" (trade only)
+input string   InpSymbolOverride  = "";        // Symbol override for server (e.g. "GBPJPY" when broker uses "GBPJPYm")
 
 //--- Global variables
 datetime g_lastScanTime = 0;
@@ -39,6 +41,10 @@ int      g_digits;         // Price digits for this symbol (e.g. 3 for JPY, 5 fo
 double   g_pipSize;        // Size of 1 pip in price units (e.g. 0.01 for JPY, 0.0001 for EUR/USD)
 datetime g_lastPollTime  = 0;
 string   g_lastTradeId   = "";  // Prevent re-executing the same trade
+
+//--- Leader/Follower mode
+bool     g_isLeader     = true;   // true = leader (analyze + trade), false = follower (trade only)
+string   g_serverSymbol = "";     // Symbol name used for server communication (may differ from _Symbol)
 
 //--- Pending limit order tracking (for session-based expiry)
 ulong    g_limitTicket1  = 0;   // TP1 limit order ticket
@@ -59,7 +65,13 @@ CTrade g_trade;
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   Print(">>> AI Analyst v3.0 [", _Symbol, "] - Multi-Pair Trade Execution <<<");
+   Print(">>> AI Analyst v4.0 [", _Symbol, "] - Leader/Follower Mode <<<");
+
+   //--- Determine mode
+   g_isLeader = (InpMode != "follower");
+
+   //--- Server symbol: use override if set, otherwise _Symbol
+   g_serverSymbol = (InpSymbolOverride != "") ? InpSymbolOverride : _Symbol;
 
    //--- Set up symbol-specific globals
    g_digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
@@ -81,24 +93,35 @@ int OnInit()
    //--- Create timer for checking every 10 seconds
    EventSetTimer(10);
 
-   //--- Save main chart layout as template for temp charts
-   if(ChartSaveTemplate(0, g_templateName))
-      Print("Main chart template saved as ", g_templateName, ".tpl");
-   else
-      Print("WARNING: Failed to save main chart template (error ", GetLastError(), ")");
+   //--- Leader-only: save chart template for screenshots
+   if(g_isLeader)
+   {
+      if(ChartSaveTemplate(0, g_templateName))
+         Print("Main chart template saved as ", g_templateName, ".tpl");
+      else
+         Print("WARNING: Failed to save main chart template (error ", GetLastError(), ")");
+   }
 
-   //--- Create manual trigger button
+   //--- Create button (scan for leader, status for follower)
    CreateManualButton();
 
    Print(_Symbol, " AI Analyst EA initialized.");
+   Print("MODE: ", (g_isLeader ? "LEADER (analyze + trade)" : "FOLLOWER (trade only)"));
+   if(g_serverSymbol != _Symbol)
+      Print("Symbol mapping: broker=", _Symbol, " → server=", g_serverSymbol);
    Print("Symbol digits: ", g_digits, " | Pip size: ", DoubleToString(g_pipSize, g_digits));
-   Print("Server URL: ", InpServerURL);
-   Print("London Open: ", IntegerToString(InpLondonOpenHour), ":",
-         StringFormat("%02d", InpLondonOpenMin), " CET");
-   Print("NY Open: ", IntegerToString(InpNYOpenHour), ":",
-         StringFormat("%02d", InpNYOpenMin), " CET");
-   Print("Timezone offset (Server - CET): ", IntegerToString(InpTimezoneOffset), " hours");
-   Print("Cooldown: ", IntegerToString(InpCooldownMinutes), " minutes");
+   Print("Server Base: ", InpServerBase);
+
+   if(g_isLeader)
+   {
+      Print("Server URL: ", InpServerURL);
+      Print("London Open: ", IntegerToString(InpLondonOpenHour), ":",
+            StringFormat("%02d", InpLondonOpenMin), " CET");
+      Print("NY Open: ", IntegerToString(InpNYOpenHour), ":",
+            StringFormat("%02d", InpNYOpenMin), " CET");
+      Print("Timezone offset (Server - CET): ", IntegerToString(InpTimezoneOffset), " hours");
+      Print("Cooldown: ", IntegerToString(InpCooldownMinutes), " minutes");
+   }
 
    return(INIT_SUCCEEDED);
 }
@@ -119,7 +142,7 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTimer()
 {
-   //--- Ensure scan button exists (may be lost after template operations)
+   //--- Ensure button exists (may be lost after template operations)
    if(ObjectFind(0, "btnManualScan") < 0)
       CreateManualButton();
 
@@ -134,63 +157,68 @@ void OnTimer()
       Print("New day detected — scan flags reset.");
    }
 
-   //--- Check if manual trigger is set (fires once then respects cooldown)
-   if(InpManualTrigger)
+   //--- LEADER-ONLY: session scanning and analysis
+   if(g_isLeader)
    {
-      if(IsCooldownElapsed())
+      //--- Check if manual trigger is set (fires once then respects cooldown)
+      if(InpManualTrigger)
       {
-         Print("Manual trigger detected via input parameter.");
-         RunAnalysis("Manual");
+         if(IsCooldownElapsed())
+         {
+            Print("Manual trigger detected via input parameter.");
+            RunAnalysis("Manual");
+         }
+         // Don't return here — still need to poll and check positions
       }
-      return;
+      else
+      {
+         //--- Convert current server time to CET
+         int serverHour = dt.hour;
+         int serverMin  = dt.min;
+
+         //--- CET time = server time - offset
+         int cetHour = serverHour - InpTimezoneOffset;
+         int cetMin  = serverMin;
+
+         //--- Normalize hour
+         if(cetHour < 0)  cetHour += 24;
+         if(cetHour >= 24) cetHour -= 24;
+
+         //--- Check London open window
+         if(!g_londonScanned && IsWithinWindow(cetHour, cetMin, InpLondonOpenHour, InpLondonOpenMin))
+         {
+            if(IsCooldownElapsed())
+            {
+               Print("London open window detected (CET ", cetHour, ":", StringFormat("%02d", cetMin), ")");
+               if(RunAnalysis("London"))
+                  g_londonScanned = true;
+            }
+         }
+
+         //--- Check NY open window
+         if(!g_nyScanned && IsWithinWindow(cetHour, cetMin, InpNYOpenHour, InpNYOpenMin))
+         {
+            if(IsCooldownElapsed())
+            {
+               Print("NY open window detected (CET ", cetHour, ":", StringFormat("%02d", cetMin), ")");
+               if(RunAnalysis("NY"))
+                  g_nyScanned = true;
+            }
+         }
+      }
    }
 
-   //--- Convert current server time to CET
-   datetime serverTime = TimeCurrent();
-   int serverHour = dt.hour;
-   int serverMin  = dt.min;
-
-   //--- CET time = server time - offset
-   int cetHour = serverHour - InpTimezoneOffset;
-   int cetMin  = serverMin;
-
-   //--- Normalize hour
-   if(cetHour < 0)  cetHour += 24;
-   if(cetHour >= 24) cetHour -= 24;
-
-   //--- Check London open window
-   if(!g_londonScanned && IsWithinWindow(cetHour, cetMin, InpLondonOpenHour, InpLondonOpenMin))
-   {
-      if(IsCooldownElapsed())
-      {
-         Print("London open window detected (CET ", cetHour, ":", StringFormat("%02d", cetMin), ")");
-         if(RunAnalysis("London"))
-            g_londonScanned = true;
-      }
-   }
-
-   //--- Check NY open window
-   if(!g_nyScanned && IsWithinWindow(cetHour, cetMin, InpNYOpenHour, InpNYOpenMin))
-   {
-      if(IsCooldownElapsed())
-      {
-         Print("NY open window detected (CET ", cetHour, ":", StringFormat("%02d", cetMin), ")");
-         if(RunAnalysis("NY"))
-            g_nyScanned = true;
-      }
-   }
-
-   //--- Poll for pending trades every 10 seconds
+   //--- ALL MODES: Poll for pending trades every 10 seconds
    if(TimeCurrent() - g_lastPollTime >= 10)
    {
       g_lastPollTime = TimeCurrent();
       PollPendingTrade();
    }
 
-   //--- Check if pending limit orders should be cancelled (session end)
+   //--- ALL MODES: Check if pending limit orders should be cancelled (session end)
    CheckLimitOrderExpiry();
 
-   //--- Check if tracked positions have closed (TP/SL hit)
+   //--- ALL MODES: Check if tracked positions have closed (TP/SL hit)
    CheckPositionClosures();
 }
 
@@ -365,7 +393,7 @@ void SendCloseReport(string tradeId, ulong ticket, double closePrice,
 
    string json = "{";
    json += "\"trade_id\":\"" + tradeId + "\",";
-   json += "\"symbol\":\"" + _Symbol + "\",";
+   json += "\"symbol\":\"" + g_serverSymbol + "\",";
    json += "\"ticket\":" + IntegerToString(ticket) + ",";
    json += "\"close_price\":" + DoubleToString(closePrice, g_digits) + ",";
    json += "\"close_reason\":\"" + reason + "\",";
@@ -394,8 +422,16 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
 {
    if(id == CHARTEVENT_OBJECT_CLICK && sparam == "btnManualScan")
    {
-      Print("Manual scan button clicked!");
-      RunAnalysis("Manual");
+      //--- Only leaders can trigger scans
+      if(g_isLeader)
+      {
+         Print("Manual scan button clicked!");
+         RunAnalysis("Manual");
+      }
+      else
+      {
+         Print("Follower mode — scan not available. Trades come from leader.");
+      }
       //--- Reset button state
       ObjectSetInteger(0, "btnManualScan", OBJPROP_STATE, false);
    }
@@ -446,13 +482,23 @@ void CreateManualButton()
    ObjectSetInteger(0, "btnManualScan", OBJPROP_XSIZE, 160);
    ObjectSetInteger(0, "btnManualScan", OBJPROP_YSIZE, 35);
 
-   //--- Appearance
-   ObjectSetString(0,  "btnManualScan", OBJPROP_TEXT, " Scan " + _Symbol + " ");
+   //--- Appearance: different style for leader vs follower
+   if(g_isLeader)
+   {
+      ObjectSetString(0,  "btnManualScan", OBJPROP_TEXT, " Scan " + _Symbol + " ");
+      ObjectSetInteger(0, "btnManualScan", OBJPROP_COLOR, clrWhite);
+      ObjectSetInteger(0, "btnManualScan", OBJPROP_BGCOLOR, clrDodgerBlue);
+      ObjectSetInteger(0, "btnManualScan", OBJPROP_BORDER_COLOR, clrDodgerBlue);
+   }
+   else
+   {
+      ObjectSetString(0,  "btnManualScan", OBJPROP_TEXT, " Follow " + g_serverSymbol + " ");
+      ObjectSetInteger(0, "btnManualScan", OBJPROP_COLOR, clrWhite);
+      ObjectSetInteger(0, "btnManualScan", OBJPROP_BGCOLOR, clrForestGreen);
+      ObjectSetInteger(0, "btnManualScan", OBJPROP_BORDER_COLOR, clrForestGreen);
+   }
    ObjectSetString(0,  "btnManualScan", OBJPROP_FONT, "Arial");
    ObjectSetInteger(0, "btnManualScan", OBJPROP_FONTSIZE, 10);
-   ObjectSetInteger(0, "btnManualScan", OBJPROP_COLOR, clrWhite);
-   ObjectSetInteger(0, "btnManualScan", OBJPROP_BGCOLOR, clrDodgerBlue);
-   ObjectSetInteger(0, "btnManualScan", OBJPROP_BORDER_COLOR, clrDodgerBlue);
 
    //--- Behavior
    ObjectSetInteger(0, "btnManualScan", OBJPROP_STATE, false);
@@ -621,8 +667,8 @@ string BuildMarketDataJSON(string session)
 {
    string json = "{";
 
-   //--- Symbol info
-   json += "\"symbol\":\"" + _Symbol + "\",";
+   //--- Symbol info (use g_serverSymbol for server-facing name)
+   json += "\"symbol\":\"" + g_serverSymbol + "\",";
    json += "\"session\":\"" + session + "\",";
    json += "\"timestamp\":\"" + TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS) + "\",";
 
@@ -813,7 +859,7 @@ bool SendToServer(string fileH1, string fileM15, string fileM5, string &jsonData
 //+------------------------------------------------------------------+
 void PollPendingTrade()
 {
-   string url = InpServerBase + "/pending_trade?symbol=" + _Symbol;
+   string url = InpServerBase + "/pending_trade?symbol=" + g_serverSymbol;
    char   postData[];  // empty — this is GET
    char   result[];
    string resultHeaders;
@@ -1197,10 +1243,10 @@ void SendExecutionReport(string tradeId, int ticket1, int ticket2,
 {
    string url = InpServerBase + "/trade_executed";
 
-   //--- Build JSON body
+   //--- Build JSON body (use g_serverSymbol so server matches the correct trade)
    string json = "{";
    json += "\"trade_id\":\"" + tradeId + "\",";
-   json += "\"symbol\":\"" + _Symbol + "\",";
+   json += "\"symbol\":\"" + g_serverSymbol + "\",";
    json += "\"ticket_tp1\":" + IntegerToString(ticket1) + ",";
    json += "\"ticket_tp2\":" + IntegerToString(ticket2) + ",";
    json += "\"lots_tp1\":" + DoubleToString(lots1, 2) + ",";
