@@ -20,15 +20,33 @@ class MarketData(BaseModel):
     bid: float = 0.0
     ask: float = 0.0
     spread_pips: float = 0.0
+    # ATR values
+    atr_d1: float = 0.0
     atr_h1: float = 0.0
-    atr_m15: float = 0.0
     atr_m5: float = 0.0
+    # Today's range
     daily_high: float = 0.0
     daily_low: float = 0.0
     daily_range_pips: float = 0.0
+    # Previous day levels (ICT key levels)
+    prev_day_high: float = 0.0
+    prev_day_low: float = 0.0
+    prev_day_close: float = 0.0
+    # Current week levels
+    week_high: float = 0.0
+    week_low: float = 0.0
+    # Asian session range
+    asian_high: float = 0.0
+    asian_low: float = 0.0
+    # RSI (14-period)
+    rsi_d1: float = 0.0
+    rsi_h1: float = 0.0
+    rsi_m5: float = 0.0
+    # Account
     account_balance: float = 0.0
+    # OHLC bars (D1=20, H1=100, M5=60)
+    ohlc_d1: list[OHLCBar] = []
     ohlc_h1: list[OHLCBar] = []
-    ohlc_m15: list[OHLCBar] = []
     ohlc_m5: list[OHLCBar] = []
 
 

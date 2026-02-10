@@ -69,61 +69,78 @@ Use web search to check current {base} and {quote} drivers, breaking news, and t
 - Active sessions: {profile['key_sessions']}
 - Risk per trade: 1%
 - TP strategy: 50% closed at TP1, runner to TP2
-- The chart includes horizontal swing-level lines drawn by a custom indicator
+- Charts provided: **D1 (Daily)**, **H1 (Hourly)**, **M5 (5-Minute)** — top-down
+- The charts include horizontal swing-level lines drawn by a custom indicator
+- Market data JSON includes: previous day H/L/C, weekly H/L, Asian session range, RSI(14), ATR(14)
 
 ## YOUR TASK
 
 {fundamentals_section}
 
-### Step 1 — MANDATORY: Higher-Timeframe Trend (H1)
-Before ANY setup, you MUST determine the H1 trend:
-- Identify the last 4-6 swing highs and swing lows on H1
+### Step 1 — MANDATORY: Daily Trend & Structure (D1 chart)
+Before ANYTHING, analyze the D1 (Daily) chart:
+- Identify the last 10-20 daily candles for swing structure
 - Are they making higher highs + higher lows (BULLISH) or lower highs + lower lows (BEARISH)?
-- If mixed/ranging, define the range boundaries (high and low)
-- This H1 trend is the DOMINANT BIAS. All setups must respect it unless you explicitly label the setup as "counter-trend" with extra justification
+- Note the **previous day high/low/close** from the market data — these are KEY institutional reference levels
+- Note the **current week high/low** — price often targets these for liquidity sweeps
+- Check D1 RSI: >70 = overbought (caution for longs), <30 = oversold (caution for shorts), 40-60 = neutral
+- The D1 trend is the DOMINANT BIAS. All setups must respect it.
 
-### Step 2 — Premium/Discount Zone
+### Step 2 — H1 Structure & Premium/Discount Zone
+- Identify H1 swing structure within the context of D1 trend (alignment or divergence?)
 - Define the current H1 range (recent swing high to recent swing low)
 - Calculate the equilibrium (50% level)
 - Determine if price is currently in:
   - DISCOUNT zone (below 50%) — favorable for longs
   - PREMIUM zone (above 50%) — favorable for shorts
   - EQUILIBRIUM (near 50%) — no-man's-land, avoid entries here
+- Check H1 RSI for confirmation
 - Do NOT propose longs from premium zone or shorts from discount zone unless counter-trend with strong justification
 
-### Step 3 — Multi-Timeframe Structure (H1 → M15 → M5)
+### Step 3 — Session Levels & Liquidity
+Use the provided market data to identify key levels:
+- **Previous Day High (PDH)** and **Previous Day Low (PDL)** — institutional liquidity magnets
+- **Previous Day Close (PDC)** — acts as support/resistance pivot
+- **Asian Session Range** (asian_high/asian_low) — London often sweeps one side of the Asian range before reversing
+- **Weekly High/Low** — key swing liquidity targets
+- Mark which of these levels price is currently near or has recently swept
+
+### Step 4 — Multi-Timeframe Alignment (D1 → H1 → M5)
 - Market structure per timeframe: BOS, ChoCH locations with exact prices
-- Are lower timeframes aligned with H1, or showing early reversal signs?
+- Is M5 structure aligned with H1 and D1, or showing early reversal signs?
 - Key swing highs/lows with exact price levels
 
-### Step 4 — Key Levels (be precise with prices)
+### Step 5 — Key ICT Levels (be precise with prices)
 - Order blocks / supply & demand zones — specify if tested or untested
 - Fair Value Gaps (FVGs) — specify if filled or open
 - Institutional liquidity pools (equal highs/lows, stop clusters)
+- Breaker blocks, mitigation blocks where applicable
 - Distinguish between: where price BOUNCED FROM vs where price IS NOW (these are different!)
 
-### Step 5 — Setup Generation
+### Step 6 — Setup Generation
 ONLY propose setups that satisfy ALL of these:
-1. H1 trend-aligned (or explicitly labeled "counter-trend" with 4+ confluence factors)
+1. D1 trend-aligned (or explicitly labeled "counter-trend" with 4+ confluence factors)
 2. Entry in the correct zone (longs from discount, shorts from premium)
 3. Minimum 1:2 R:R on TP1 (not just TP2)
 4. At least 3 confluence factors
 5. Clear invalidation level
+6. Session level confluence (setup interacts with PDH/PDL/PDC, Asian range, or weekly levels)
 
 For counter-trend setups, you MUST:
 - Explicitly state "This is a COUNTER-TREND trade"
 - Require 4+ confluence factors instead of 3
-- Show a ChoCH or BOS on M15 confirming the reversal
+- Show a ChoCH or BOS on H1 or M5 confirming the reversal
 - Only rate confidence as "medium" at most (never "high" for counter-trend)
 
-### Step 6 — NO TRADE Decision
+### Step 7 — NO TRADE Decision
 Return an EMPTY setups array if ANY of these apply:
 - Price is in equilibrium / mid-range with no clear direction
-- H1 trend is bearish but only long setups are visible (and vice versa)
+- D1 trend is bearish but only long setups are visible (and vice versa)
 - High-impact news within 2 hours
 - No untested key levels nearby
 - Confluence count is below 3
 - TP1 R:R is below 1:2
+- RSI shows exhaustion against the proposed trade direction
 - You are unsure — when in doubt, stay out
 
 ## OUTPUT FORMAT
@@ -152,8 +169,8 @@ Respond with ONLY valid JSON matching this structure:
       "price_zone": "premium" or "discount" or "equilibrium"
     }}
   ],
-  "h1_trend_analysis": "2-3 sentences describing the H1 swing structure and dominant trend",
-  "market_summary": "2-3 sentence summary",
+  "h1_trend_analysis": "2-3 sentences describing D1+H1 swing structure and dominant trend",
+  "market_summary": "2-3 sentence summary including key session levels",
   "primary_scenario": "description",
   "alternative_scenario": "description",
   "fundamental_bias": {profile['fundamental_bias_options']},
@@ -162,9 +179,11 @@ Respond with ONLY valid JSON matching this structure:
 
 ## RULES
 - No setup is better than a bad setup — return empty setups array if no clear edge
-- ALWAYS identify the H1 trend FIRST — this overrides everything
-- Trade WITH the trend, not against it
+- ALWAYS analyze D1 trend FIRST — this is the dominant bias that overrides everything
+- Trade WITH the daily trend, not against it
+- Use session levels (PDH/PDL/PDC, Asian range, weekly H/L) as confluence and targets
 - Consider {symbol} spread (~{profile['typical_spread']}) in SL/TP calculations
+- Use RSI as confirmation, not as a standalone signal
 - Flag any setups near high-impact news events
 - Be honest about uncertainty — "NO TRADE" is a valid and respectable output
 - Always respond with valid JSON, nothing else"""
@@ -176,13 +195,16 @@ def _build_screening_prompt(symbol: str, profile: dict, fundamentals: Optional[s
     if fundamentals:
         fund_section = f"\n\nFundamental context (gathered earlier today):\n{fundamentals}"
 
-    return f"""You are a quick-scan FX analyst. Look at these {symbol} charts (H1, M15, M5) and determine if there is a clear, high-probability ICT trade setup.{fund_section}
+    return f"""You are a quick-scan FX analyst. Look at these {symbol} charts (D1, H1, M5) and the market data to determine if there is a clear, high-probability ICT trade setup.{fund_section}
 
 Check:
-1. H1 trend direction (bullish / bearish / ranging)
-2. Is price at a key level (order block, FVG, liquidity zone)?
-3. Do multiple timeframes align?
-4. Is there a clear entry with minimum 1:2 R:R on TP1?
+1. D1 trend direction — this is the dominant bias (bullish / bearish / ranging)
+2. H1 structure — aligned with D1 or diverging?
+3. Is price at a key level (order block, FVG, PDH/PDL, Asian range sweep)?
+4. RSI confirmation — does RSI support the direction?
+5. Is there a clear entry with minimum 1:2 R:R on TP1?
+
+The market data JSON includes previous day H/L/C, weekly H/L, Asian session range, RSI values, and ATR.
 
 Respond with ONLY this JSON:
 {{
@@ -197,8 +219,8 @@ Respond with ONLY this JSON:
 # User content builders
 # ---------------------------------------------------------------------------
 def _build_image_content(
+    screenshot_d1: bytes,
     screenshot_h1: bytes,
-    screenshot_m15: bytes,
     screenshot_m5: bytes,
     market_data: MarketData,
 ) -> list[dict]:
@@ -206,9 +228,9 @@ def _build_image_content(
     content: list[dict] = []
 
     for label, img_bytes in [
-        ("H1", screenshot_h1),
-        ("M15", screenshot_m15),
-        ("M5", screenshot_m5),
+        ("D1 (Daily)", screenshot_d1),
+        ("H1 (Hourly)", screenshot_h1),
+        ("M5 (5-Minute)", screenshot_m5),
     ]:
         content.append({"type": "text", "text": f"--- {label} Chart ---"})
         content.append(
@@ -224,8 +246,8 @@ def _build_image_content(
 
     market_dict = market_data.model_dump()
     ohlc_summary = {
+        "d1_bars": len(market_dict.get("ohlc_d1", [])),
         "h1_bars": len(market_dict.get("ohlc_h1", [])),
-        "m15_bars": len(market_dict.get("ohlc_m15", [])),
         "m5_bars": len(market_dict.get("ohlc_m5", [])),
     }
     display_data = {k: v for k, v in market_dict.items() if not k.startswith("ohlc_")}
@@ -235,13 +257,13 @@ def _build_image_content(
         {
             "type": "text",
             "text": (
-                "--- Market Data ---\n"
+                "--- Market Data (includes session levels, RSI, ATR) ---\n"
                 + json.dumps(display_data, indent=2)
                 + "\n\n--- Full OHLC Data ---\n"
                 + json.dumps(
                     {
+                        "ohlc_d1": market_dict.get("ohlc_d1", []),
                         "ohlc_h1": market_dict.get("ohlc_h1", []),
-                        "ohlc_m15": market_dict.get("ohlc_m15", []),
                         "ohlc_m5": market_dict.get("ohlc_m5", []),
                     }
                 )
@@ -354,8 +376,8 @@ async def fetch_fundamentals(symbol: str, profile: dict) -> str:
 # Tier 1: Sonnet screening (cheap, every scan)
 # ---------------------------------------------------------------------------
 async def screen_charts(
+    screenshot_d1: bytes,
     screenshot_h1: bytes,
-    screenshot_m15: bytes,
     screenshot_m5: bytes,
     market_data: MarketData,
     profile: dict,
@@ -369,8 +391,8 @@ async def screen_charts(
     client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
     symbol = market_data.symbol
 
-    user_content = _build_image_content(screenshot_h1, screenshot_m15, screenshot_m5, market_data)
-    user_content.append({"type": "text", "text": "Screen these charts. Is there a valid ICT setup? Reply with JSON only."})
+    user_content = _build_image_content(screenshot_d1, screenshot_h1, screenshot_m5, market_data)
+    user_content.append({"type": "text", "text": "Screen these D1/H1/M5 charts plus the session levels and RSI data. Is there a valid ICT setup? Reply with JSON only."})
 
     try:
         logger.info("[%s] Sonnet screening...", symbol)
@@ -405,8 +427,8 @@ async def screen_charts(
 # Tier 2: Opus full analysis (expensive, only when screening passes)
 # ---------------------------------------------------------------------------
 async def analyze_charts_full(
+    screenshot_d1: bytes,
     screenshot_h1: bytes,
-    screenshot_m15: bytes,
     screenshot_m5: bytes,
     market_data: MarketData,
     profile: dict,
@@ -420,7 +442,7 @@ async def analyze_charts_full(
     client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
     symbol = market_data.symbol
 
-    user_content = _build_image_content(screenshot_h1, screenshot_m15, screenshot_m5, market_data)
+    user_content = _build_image_content(screenshot_d1, screenshot_h1, screenshot_m5, market_data)
 
     # If we have cached fundamentals, no web search needed
     use_web_search = fundamentals is None
@@ -429,12 +451,12 @@ async def analyze_charts_full(
     if use_web_search:
         user_content.append({
             "type": "text",
-            "text": "Analyze the charts and market data above. First use web_search to check fundamentals and news, then provide your analysis as JSON.",
+            "text": "Analyze the D1/H1/M5 charts and market data above (including session levels, RSI, ATR). First use web_search to check fundamentals and news, then provide your full ICT analysis as JSON.",
         })
     else:
         user_content.append({
             "type": "text",
-            "text": "Analyze the charts and market data above using the pre-loaded fundamentals. Provide your analysis as JSON.",
+            "text": "Analyze the D1/H1/M5 charts and market data above (including session levels, RSI, ATR) using the pre-loaded fundamentals. Provide your full ICT analysis as JSON.",
         })
 
     tools = []
@@ -516,13 +538,14 @@ async def analyze_charts_full(
 # Main entry point: two-tier analysis pipeline
 # ---------------------------------------------------------------------------
 async def analyze_charts(
+    screenshot_d1: bytes,
     screenshot_h1: bytes,
-    screenshot_m15: bytes,
     screenshot_m5: bytes,
     market_data: MarketData,
 ) -> AnalysisResult:
     """Two-tier analysis: Sonnet screens → Opus analyzes (if setup found).
-    Fundamentals fetched once per day via Sonnet + web search."""
+    Fundamentals fetched once per day via Sonnet + web search.
+    Charts: D1 (daily trend), H1 (intraday structure), M5 (entry timing)."""
     symbol = market_data.symbol
     profile = get_profile(symbol)
 
@@ -531,7 +554,7 @@ async def analyze_charts(
 
     # Step 2: Sonnet screening (cheap, every scan, no web search)
     screening = await screen_charts(
-        screenshot_h1, screenshot_m15, screenshot_m5,
+        screenshot_d1, screenshot_h1, screenshot_m5,
         market_data, profile, fundamentals,
     )
 
@@ -549,6 +572,6 @@ async def analyze_charts(
     # Step 3: Opus full analysis (expensive, only when Sonnet found something)
     logger.info("[%s] Sonnet found potential setup — escalating to Opus", symbol)
     return await analyze_charts_full(
-        screenshot_h1, screenshot_m15, screenshot_m5,
+        screenshot_d1, screenshot_h1, screenshot_m5,
         market_data, profile, fundamentals,
     )

@@ -20,8 +20,8 @@ input int      InpNYOpenHour      = 14;     // NY Open Hour (CET)
 input int      InpNYOpenMin       = 30;     // NY Open Minute
 input int      InpTimezoneOffset  = 0;      // Timezone Offset (Server - CET) in hours
 input int      InpCooldownMinutes = 30;     // Cooldown after scan (minutes)
-input int      InpScreenshotWidth = 1920;   // Screenshot Width
-input int      InpScreenshotHeight= 1080;   // Screenshot Height
+input int      InpScreenshotWidth = 2560;   // Screenshot Width
+input int      InpScreenshotHeight= 1440;   // Screenshot Height
 input bool     InpManualTrigger   = false;  // Manual Trigger (set true to force scan)
 input double   InpRiskPercent     = 1.0;    // Risk % per trade
 input int      InpMagicNumber     = 888888; // Magic Number for trades
@@ -518,12 +518,12 @@ bool RunAnalysis(string session)
 {
    Print("=== Starting ", session, " session analysis for ", _Symbol, " ===");
 
-   //--- Step 1: Capture screenshots for all 3 timeframes
+   //--- Step 1: Capture screenshots for D1, H1, M5 (top-down multi-timeframe)
+   string fileD1  = CaptureTimeframeScreenshot(PERIOD_D1, "D1");
    string fileH1  = CaptureTimeframeScreenshot(PERIOD_H1, "H1");
-   string fileM15 = CaptureTimeframeScreenshot(PERIOD_M15, "M15");
    string fileM5  = CaptureTimeframeScreenshot(PERIOD_M5, "M5");
 
-   if(fileH1 == "" || fileM15 == "" || fileM5 == "")
+   if(fileD1 == "" || fileH1 == "" || fileM5 == "")
    {
       Print("ERROR: Failed to capture one or more screenshots.");
       return false;
@@ -536,7 +536,7 @@ bool RunAnalysis(string session)
    Print("Market data JSON built (", StringLen(jsonData), " chars).");
 
    //--- Step 3: Send to server
-   bool result = SendToServer(fileH1, fileM15, fileM5, jsonData);
+   bool result = SendToServer(fileD1, fileH1, fileM5, jsonData);
 
    if(result)
    {
@@ -549,8 +549,8 @@ bool RunAnalysis(string session)
    }
 
    //--- Cleanup screenshot files
+   FileDelete(fileD1);
    FileDelete(fileH1);
-   FileDelete(fileM15);
    FileDelete(fileM5);
 
    //--- Restore scan button (temp chart operations may have removed it)
@@ -681,12 +681,12 @@ string BuildMarketDataJSON(string session)
    json += "\"ask\":" + DoubleToString(ask, g_digits) + ",";
    json += "\"spread_pips\":" + DoubleToString(spread, 1) + ",";
 
-   //--- ATR values
+   //--- ATR values (D1, H1, M5)
+   json += "\"atr_d1\":" + DoubleToString(GetATR(PERIOD_D1, 14), g_digits) + ",";
    json += "\"atr_h1\":" + DoubleToString(GetATR(PERIOD_H1, 14), g_digits) + ",";
-   json += "\"atr_m15\":" + DoubleToString(GetATR(PERIOD_M15, 14), g_digits) + ",";
    json += "\"atr_m5\":" + DoubleToString(GetATR(PERIOD_M5, 14), g_digits) + ",";
 
-   //--- Daily range
+   //--- Daily range (today)
    double dayHigh = iHigh(_Symbol, PERIOD_D1, 0);
    double dayLow  = iLow(_Symbol, PERIOD_D1, 0);
    double dayRange = (dayHigh - dayLow) / g_pipSize;
@@ -694,13 +694,35 @@ string BuildMarketDataJSON(string session)
    json += "\"daily_low\":" + DoubleToString(dayLow, g_digits) + ",";
    json += "\"daily_range_pips\":" + DoubleToString(dayRange, 1) + ",";
 
+   //--- Previous day levels (critical ICT levels)
+   json += "\"prev_day_high\":" + DoubleToString(iHigh(_Symbol, PERIOD_D1, 1), g_digits) + ",";
+   json += "\"prev_day_low\":" + DoubleToString(iLow(_Symbol, PERIOD_D1, 1), g_digits) + ",";
+   json += "\"prev_day_close\":" + DoubleToString(iClose(_Symbol, PERIOD_D1, 1), g_digits) + ",";
+
+   //--- Current week levels
+   json += "\"week_high\":" + DoubleToString(iHigh(_Symbol, PERIOD_W1, 0), g_digits) + ",";
+   json += "\"week_low\":" + DoubleToString(iLow(_Symbol, PERIOD_W1, 0), g_digits) + ",";
+
+   //--- Asian session range (00:00-08:00 CET)
+   double asianHigh = 0, asianLow = 0;
+   if(GetSessionRange(0, 8, asianHigh, asianLow))
+   {
+      json += "\"asian_high\":" + DoubleToString(asianHigh, g_digits) + ",";
+      json += "\"asian_low\":" + DoubleToString(asianLow, g_digits) + ",";
+   }
+
+   //--- RSI values (14-period)
+   json += "\"rsi_d1\":" + DoubleToString(GetRSI(PERIOD_D1, 14), 1) + ",";
+   json += "\"rsi_h1\":" + DoubleToString(GetRSI(PERIOD_H1, 14), 1) + ",";
+   json += "\"rsi_m5\":" + DoubleToString(GetRSI(PERIOD_M5, 14), 1) + ",";
+
    //--- Account balance
    json += "\"account_balance\":" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + ",";
 
-   //--- OHLC data for each timeframe
-   json += "\"ohlc_h1\":" + GetOHLCArray(PERIOD_H1, 20) + ",";
-   json += "\"ohlc_m15\":" + GetOHLCArray(PERIOD_M15, 20) + ",";
-   json += "\"ohlc_m5\":" + GetOHLCArray(PERIOD_M5, 20);
+   //--- OHLC data (D1=20 bars ~1 month, H1=100 bars ~4 days, M5=60 bars ~5 hours)
+   json += "\"ohlc_d1\":" + GetOHLCArray(PERIOD_D1, 20) + ",";
+   json += "\"ohlc_h1\":" + GetOHLCArray(PERIOD_H1, 100) + ",";
+   json += "\"ohlc_m5\":" + GetOHLCArray(PERIOD_M5, 60);
 
    json += "}";
    return json;
@@ -731,6 +753,69 @@ double GetATR(ENUM_TIMEFRAMES tf, int period)
    double val = atrBuffer[0];
    IndicatorRelease(handle);
    return val;
+}
+
+//+------------------------------------------------------------------+
+//| Get RSI value for a timeframe                                      |
+//+------------------------------------------------------------------+
+double GetRSI(ENUM_TIMEFRAMES tf, int period)
+{
+   int handle = iRSI(_Symbol, tf, period, PRICE_CLOSE);
+   if(handle == INVALID_HANDLE)
+   {
+      Print("ERROR: Failed to create RSI indicator for ", EnumToString(tf));
+      return 0;
+   }
+
+   double rsiBuffer[];
+   ArraySetAsSeries(rsiBuffer, true);
+
+   if(CopyBuffer(handle, 0, 0, 1, rsiBuffer) <= 0)
+   {
+      Print("ERROR: Failed to copy RSI buffer for ", EnumToString(tf));
+      IndicatorRelease(handle);
+      return 0;
+   }
+
+   double val = rsiBuffer[0];
+   IndicatorRelease(handle);
+   return val;
+}
+
+//+------------------------------------------------------------------+
+//| Get session high/low range (using CET hours, reads H1 bars)        |
+//+------------------------------------------------------------------+
+bool GetSessionRange(int startCetHour, int endCetHour, double &high, double &low)
+{
+   //--- Get midnight (server time) of today
+   MqlDateTime dtNow;
+   TimeCurrent(dtNow);
+   dtNow.hour = 0;
+   dtNow.min = 0;
+   dtNow.sec = 0;
+   datetime midnight = StructToTime(dtNow);
+
+   //--- Convert CET hours to server time
+   int startServerHour = startCetHour + InpTimezoneOffset;
+   int endServerHour   = endCetHour + InpTimezoneOffset;
+
+   datetime tStart = midnight + startServerHour * 3600;
+   datetime tEnd   = midnight + endServerHour * 3600;
+
+   //--- Get H1 bars within the time range
+   MqlRates rates[];
+   ArraySetAsSeries(rates, false);
+   int copied = CopyRates(_Symbol, PERIOD_H1, tStart, tEnd, rates);
+   if(copied <= 0) return false;
+
+   high = rates[0].high;
+   low  = rates[0].low;
+   for(int i = 1; i < copied; i++)
+   {
+      if(rates[i].high > high) high = rates[i].high;
+      if(rates[i].low < low)   low  = rates[i].low;
+   }
+   return true;
 }
 
 //+------------------------------------------------------------------+
@@ -796,7 +881,7 @@ void AppendBinaryToBody(char &body[], uchar &bin[], int binSize)
 //+------------------------------------------------------------------+
 //| Send data to Python server via multipart POST                      |
 //+------------------------------------------------------------------+
-bool SendToServer(string fileH1, string fileM15, string fileM5, string &jsonData)
+bool SendToServer(string fileD1, string fileH1, string fileM5, string &jsonData)
 {
    string boundary = "----AIBound" + IntegerToString(GetTickCount());
 
@@ -809,9 +894,9 @@ bool SendToServer(string fileH1, string fileM15, string fileM5, string &jsonData
    AppendStringToBody(postData, "\r\n");
    AppendStringToBody(postData, jsonData);
 
-   //--- Part 2-4: screenshot files
+   //--- Part 2-4: screenshot files (D1, H1, M5 — top-down order)
+   AppendFilePart(postData, boundary, "screenshot_d1", fileD1);
    AppendFilePart(postData, boundary, "screenshot_h1", fileH1);
-   AppendFilePart(postData, boundary, "screenshot_m15", fileM15);
    AppendFilePart(postData, boundary, "screenshot_m5", fileM5);
 
    //--- Closing boundary
