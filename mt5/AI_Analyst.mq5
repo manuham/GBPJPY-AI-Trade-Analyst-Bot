@@ -1,12 +1,12 @@
 //+------------------------------------------------------------------+
 //|                                                  AI_Analyst.mq5  |
-//|                   AI Trade Analyst Bot — Leader/Follower           |
-//|                   Leader: screenshots + analysis + trade           |
-//|                   Follower: polls + trades only (copy trades)      |
+//|                   AI Trade Analyst Bot — Risk Management           |
+//|                   Break-even after TP1, trailing stop to TP1       |
+//|                   Leader/follower mode for multi-account           |
 //+------------------------------------------------------------------+
 #property copyright "AI Trade Analyst Bot"
 #property link      ""
-#property version   "4.00"
+#property version   "5.00"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -57,6 +57,14 @@ ulong    g_posTicket1    = 0;   // TP1 position ticket (market orders)
 ulong    g_posTicket2    = 0;   // TP2 position ticket (market orders)
 string   g_posTradeId    = "";  // Trade ID for the currently tracked positions
 
+//--- Trade level tracking (for break-even and trailing stop management)
+double   g_tradeEntry    = 0;   // Actual entry price
+double   g_tradeSL       = 0;   // Original SL price
+double   g_tradeTP1      = 0;   // TP1 level
+double   g_tradeTP2      = 0;   // TP2 level
+string   g_tradeBias     = "";  // "long" or "short"
+bool     g_tp1Hit        = false; // Whether TP1 has been hit (for break-even tracking)
+
 //--- Trade object
 CTrade g_trade;
 
@@ -65,7 +73,7 @@ CTrade g_trade;
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   Print(">>> AI Analyst v4.0 [", _Symbol, "] - Leader/Follower Mode <<<");
+   Print(">>> AI Analyst v5.0 [", _Symbol, "] - Risk Management <<<");
 
    //--- Determine mode
    g_isLeader = (InpMode != "follower");
@@ -220,6 +228,9 @@ void OnTimer()
 
    //--- ALL MODES: Check if tracked positions have closed (TP/SL hit)
    CheckPositionClosures();
+
+   //--- ALL MODES: Manage trailing stop on TP2 runner
+   ManageTrailingStop();
 }
 
 //+------------------------------------------------------------------+
@@ -287,6 +298,13 @@ void CheckPositionClosures()
          }
 
          g_posTicket1 = 0;
+
+         //--- BREAK-EVEN: If TP1 was hit and TP2 is still open, move SL to entry
+         if((reason == "tp1") && g_posTicket2 > 0 && g_tradeEntry > 0)
+         {
+            g_tp1Hit = true;
+            MoveToBreakeven();
+         }
       }
    }
 
@@ -317,7 +335,110 @@ void CheckPositionClosures()
 
    //--- If both positions closed, clear tracking
    if(g_posTicket1 == 0 && g_posTicket2 == 0)
-      g_posTradeId = "";
+   {
+      g_posTradeId  = "";
+      g_tradeEntry  = 0;
+      g_tradeSL     = 0;
+      g_tradeTP1    = 0;
+      g_tradeTP2    = 0;
+      g_tradeBias   = "";
+      g_tp1Hit      = false;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Move TP2 stop-loss to break-even (entry price) after TP1 hit       |
+//+------------------------------------------------------------------+
+void MoveToBreakeven()
+{
+   if(g_posTicket2 == 0 || g_tradeEntry == 0)
+      return;
+
+   if(!PositionSelectByTicket(g_posTicket2))
+   {
+      Print("Break-even: TP2 position #", g_posTicket2, " not found (may have closed)");
+      return;
+   }
+
+   double currentSL = PositionGetDouble(POSITION_SL);
+   double currentTP = PositionGetDouble(POSITION_TP);
+   double newSL     = NormalizeDouble(g_tradeEntry, g_digits);
+
+   //--- Only move SL if it's actually an improvement
+   bool shouldMove = false;
+   if(g_tradeBias == "long" && newSL > currentSL)
+      shouldMove = true;
+   else if(g_tradeBias == "short" && (newSL < currentSL || currentSL == 0))
+      shouldMove = true;
+
+   if(shouldMove)
+   {
+      if(g_trade.PositionModify(g_posTicket2, newSL, currentTP))
+         Print("BREAK-EVEN: TP2 #", g_posTicket2, " SL moved to entry ", DoubleToString(newSL, g_digits));
+      else
+         Print("WARNING: Break-even modify failed: ", g_trade.ResultRetcodeDescription());
+   }
+   else
+   {
+      Print("Break-even: SL already at or beyond entry (current=", DoubleToString(currentSL, g_digits),
+            " entry=", DoubleToString(newSL, g_digits), ")");
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Trailing stop management for TP2 runner                            |
+//| When price reaches 75% of TP2 distance, trail SL to TP1 level     |
+//+------------------------------------------------------------------+
+void ManageTrailingStop()
+{
+   //--- Only manage if TP2 is open and TP1 has been hit (break-even already done)
+   if(g_posTicket2 == 0 || g_tradeTP2 == 0 || !g_tp1Hit)
+      return;
+
+   if(!PositionSelectByTicket(g_posTicket2))
+      return;
+
+   //--- Get current market price
+   double currentPrice;
+   if(g_tradeBias == "long")
+      currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   else
+      currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+   //--- Calculate progress toward TP2
+   double totalDistance = MathAbs(g_tradeTP2 - g_tradeEntry);
+   if(totalDistance == 0) return;
+
+   double currentProgress;
+   if(g_tradeBias == "long")
+      currentProgress = currentPrice - g_tradeEntry;
+   else
+      currentProgress = g_tradeEntry - currentPrice;
+
+   double progressPct = currentProgress / totalDistance;
+
+   //--- When price reaches 75% of TP2 distance, trail SL to TP1 level
+   if(progressPct >= 0.75)
+   {
+      double currentSL = PositionGetDouble(POSITION_SL);
+      double currentTP = PositionGetDouble(POSITION_TP);
+      double newSL     = NormalizeDouble(g_tradeTP1, g_digits);
+
+      bool shouldMove = false;
+      if(g_tradeBias == "long" && newSL > currentSL)
+         shouldMove = true;
+      else if(g_tradeBias == "short" && newSL < currentSL)
+         shouldMove = true;
+
+      if(shouldMove)
+      {
+         if(g_trade.PositionModify(g_posTicket2, newSL, currentTP))
+            Print("TRAILING STOP: TP2 #", g_posTicket2, " SL trailed to TP1 level ",
+                  DoubleToString(newSL, g_digits), " (progress: ", DoubleToString(progressPct * 100, 0), "%)");
+         else
+            Print("WARNING: Trailing stop modify failed: ", g_trade.ResultRetcodeDescription());
+      }
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -1196,6 +1317,14 @@ void ExecuteTrade(string tradeId, string bias, double entryMin, double entryMax,
       g_limitTicket2 = ticket2;
       g_limitTradeId = tradeId;
 
+      //--- Store trade levels for break-even and trailing stop management
+      g_tradeEntry = limitPrice;
+      g_tradeSL    = stopLoss;
+      g_tradeTP1   = tp1;
+      g_tradeTP2   = tp2;
+      g_tradeBias  = bias;
+      g_tp1Hit     = false;
+
       //--- Determine current session from CET hour
       MqlDateTime dtNow;
       TimeCurrent(dtNow);
@@ -1273,6 +1402,14 @@ void ExecuteTrade(string tradeId, string bias, double entryMin, double entryMax,
       g_posTicket1 = ticket1;
       g_posTicket2 = ticket2;
       g_posTradeId = tradeId;
+
+      //--- Store trade levels for break-even and trailing stop management
+      g_tradeEntry = actualEntry;
+      g_tradeSL    = stopLoss;
+      g_tradeTP1   = tp1;
+      g_tradeTP2   = tp2;
+      g_tradeBias  = bias;
+      g_tp1Hit     = false;
 
       SendExecutionReport(tradeId, (int)ticket1, (int)ticket2, lotsTP1, lotsTP2,
                           actualEntry, stopLoss, tp1, tp2, "executed", "");

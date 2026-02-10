@@ -11,6 +11,7 @@ import anthropic
 from config import ANTHROPIC_API_KEY
 from models import AnalysisResult, MarketData, TradeSetup
 from pair_profiles import get_profile
+from trade_tracker import get_recent_closed_for_pair
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +214,51 @@ Respond with ONLY this JSON:
   "reasoning": "1-2 sentences explaining why trade or no trade",
   "market_summary": "1-2 sentence market overview"
 }}"""
+
+
+# ---------------------------------------------------------------------------
+# Performance feedback builder (Feature 5)
+# ---------------------------------------------------------------------------
+def _build_performance_feedback(symbol: str) -> Optional[str]:
+    """Build performance feedback text from recent closed trades for this pair."""
+    try:
+        trades = get_recent_closed_for_pair(symbol, limit=10)
+    except Exception as e:
+        logger.warning("Failed to get performance history for %s: %s", symbol, e)
+        return None
+
+    if not trades:
+        return None
+
+    lines = [f"Your last {len(trades)} completed trades for {symbol}:"]
+    wins = 0
+    losses = 0
+    total_pnl = 0.0
+
+    for i, t in enumerate(trades, 1):
+        outcome = t.get("outcome", "?")
+        pnl = t.get("pnl_pips") or 0
+        bias = (t.get("bias") or "?").upper()
+        conf = t.get("confidence") or "?"
+        trend = t.get("h1_trend") or "?"
+        ct = " [COUNTER-TREND]" if t.get("counter_trend") else ""
+        date_str = (t.get("closed_at") or "")[:10]
+
+        emoji = {"full_win": "W", "partial_win": "PW", "loss": "L"}.get(outcome, outcome)
+        lines.append(f"  {i}. {emoji} {bias} ({conf}) {pnl:+.0f}p — {trend}{ct} — {date_str}")
+
+        if outcome in ("full_win", "partial_win"):
+            wins += 1
+        elif outcome == "loss":
+            losses += 1
+        total_pnl += pnl
+
+    total = wins + losses
+    wr = (wins / total * 100) if total > 0 else 0
+    lines.append(f"\nWin rate: {wr:.0f}% ({wins}W / {losses}L) | Net: {total_pnl:+.0f} pips")
+    lines.append("Learn from these results. Avoid patterns that keep losing. Double down on what works.")
+
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -447,6 +493,14 @@ async def analyze_charts_full(
     # If we have cached fundamentals, no web search needed
     use_web_search = fundamentals is None
     system_prompt = build_system_prompt(symbol, profile, fundamentals)
+
+    # Inject performance feedback (Feature 5)
+    perf_feedback = _build_performance_feedback(symbol)
+    if perf_feedback:
+        user_content.append({
+            "type": "text",
+            "text": f"--- Your Recent Trade Performance ---\n{perf_feedback}",
+        })
 
     if use_web_search:
         user_content.append({
