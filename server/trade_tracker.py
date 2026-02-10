@@ -112,6 +112,11 @@ def init_db():
     """Initialize the database schema."""
     with _get_db() as conn:
         conn.executescript(_SCHEMA)
+        # Migration: add raw_response column for trade journal (Feature 6)
+        try:
+            conn.execute("ALTER TABLE trades ADD COLUMN raw_response TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
     logger.info("Trade tracker database initialized at %s", DB_PATH)
 
 
@@ -137,6 +142,7 @@ def log_trade_queued(
     h1_trend: str = "",
     counter_trend: bool = False,
     market_summary: str = "",
+    raw_response: str = "",
 ):
     """Log a trade when the user clicks Execute on Telegram."""
     now = datetime.now(timezone.utc).isoformat()
@@ -146,13 +152,15 @@ def log_trade_queued(
             (id, symbol, bias, confidence, session,
              entry_min, entry_max, stop_loss, tp1, tp2,
              sl_pips, tp1_pips, tp2_pips, rr_tp1, rr_tp2,
-             status, created_at, h1_trend, counter_trend, market_summary)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)""",
+             status, created_at, h1_trend, counter_trend, market_summary,
+             raw_response)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)""",
             (
                 trade_id, symbol, bias, confidence, session,
                 entry_min, entry_max, stop_loss, tp1, tp2,
                 sl_pips, tp1_pips, tp2_pips, rr_tp1, rr_tp2,
                 now, h1_trend, int(counter_trend), market_summary,
+                raw_response,
             ),
         )
     logger.info("[%s] Trade %s logged as QUEUED", symbol, trade_id)
@@ -412,5 +420,101 @@ def get_open_trades() -> list[dict]:
     with _get_db() as conn:
         rows = conn.execute(
             "SELECT * FROM trades WHERE outcome = 'open' AND status IN ('executed', 'pending')"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Risk management queries
+# ---------------------------------------------------------------------------
+def get_daily_pnl() -> dict:
+    """Get today's realized P&L from closed trades (for FTMO drawdown check)."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    with _get_db() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(pnl_money), 0) as total_pnl, COUNT(*) as count "
+            "FROM trades WHERE closed_at LIKE ? AND status = 'closed'",
+            (f"{today}%",),
+        ).fetchone()
+        return {
+            "daily_pnl": row["total_pnl"],
+            "closed_trades_today": row["count"],
+        }
+
+
+def get_open_currency_exposure() -> dict[str, list[str]]:
+    """Get currently exposed currencies from open trades.
+
+    For each currency, returns list of exposures like:
+      {"GBP": ["GBPJPY:long_GBP", "GBPUSD:long_GBP"],
+       "JPY": ["GBPJPY:short_JPY"]}
+
+    Long GBPJPY = long GBP + short JPY
+    Short GBPJPY = short GBP + long JPY
+    """
+    open_trades = get_open_trades()
+    exposure: dict[str, list[str]] = {}
+    for t in open_trades:
+        symbol = t["symbol"]
+        bias = t["bias"]
+        base = symbol[:3]
+        quote = symbol[3:]
+
+        if bias == "long":
+            exposure.setdefault(base, []).append(f"{symbol}:long_{base}")
+            exposure.setdefault(quote, []).append(f"{symbol}:short_{quote}")
+        else:
+            exposure.setdefault(base, []).append(f"{symbol}:short_{base}")
+            exposure.setdefault(quote, []).append(f"{symbol}:long_{quote}")
+
+    return exposure
+
+
+def check_correlation_conflict(symbol: str, bias: str) -> Optional[str]:
+    """Check if a new trade would create dangerous currency correlation.
+
+    Returns warning message if conflict found, None if safe.
+    """
+    exposure = get_open_currency_exposure()
+    base = symbol[:3]
+    quote = symbol[3:]
+
+    # Determine what this new trade would add
+    if bias == "long":
+        new_base_dir = "long"
+        new_quote_dir = "short"
+    else:
+        new_base_dir = "short"
+        new_quote_dir = "long"
+
+    conflicts = []
+
+    # Check base currency
+    for existing in exposure.get(base, []):
+        existing_dir = existing.split(":")[1].split("_")[0]  # "long" or "short"
+        if existing_dir == new_base_dir:
+            conflicts.append(f"{base} already {new_base_dir} via {existing.split(':')[0]}")
+
+    # Check quote currency
+    for existing in exposure.get(quote, []):
+        existing_dir = existing.split(":")[1].split("_")[0]
+        if existing_dir == new_quote_dir:
+            conflicts.append(f"{quote} already {new_quote_dir} via {existing.split(':')[0]}")
+
+    if conflicts:
+        return "Correlation risk: " + "; ".join(conflicts)
+    return None
+
+
+def get_recent_closed_for_pair(symbol: str, limit: int = 10) -> list[dict]:
+    """Get last N closed trades for a specific pair (for AI performance feedback)."""
+    with _get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, bias, confidence, outcome, pnl_pips, pnl_money, "
+            "sl_pips, tp1_pips, tp2_pips, h1_trend, counter_trend, "
+            "created_at, closed_at "
+            "FROM trades WHERE symbol = ? AND status = 'closed' "
+            "ORDER BY closed_at DESC LIMIT ?",
+            (symbol, limit),
         ).fetchall()
         return [dict(r) for r in rows]

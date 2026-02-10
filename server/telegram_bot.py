@@ -13,11 +13,14 @@ from telegram.ext import (
     ContextTypes,
 )
 
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, MAX_DAILY_DRAWDOWN_PCT, MAX_OPEN_TRADES
 from models import AnalysisResult, PendingTrade, TradeExecutionReport, TradeSetup
 from news_filter import check_news_restriction, get_upcoming_news
 from pair_profiles import get_profile
-from trade_tracker import log_trade_queued, get_stats, get_recent_trades
+from trade_tracker import (
+    log_trade_queued, get_stats, get_recent_trades, get_open_trades,
+    get_daily_pnl, check_correlation_conflict,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -220,7 +223,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             news_check = await check_news_restriction(symbol)
             if news_check.blocked:
                 await query.message.reply_text(
-                    f"\U0001f6ab {symbol} TRADE BLOCKED — FTMO News Restriction\n"
+                    f"\U0001f6ab {symbol} TRADE BLOCKED \u2014 FTMO News Restriction\n"
                     f"\u2501" * 20 + "\n"
                     f"\U0001f4f0 {news_check.event_currency}: {news_check.event_title}\n"
                     f"\u23f0 {news_check.message}\n\n"
@@ -229,6 +232,64 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 logger.info("[%s] Trade BLOCKED by news filter: %s", symbol, news_check.event_title)
                 return
+
+            # --- Daily Drawdown Check (FTMO protection) ---
+            try:
+                daily = get_daily_pnl()
+                daily_pnl = daily["daily_pnl"]
+                # We need account balance — use from latest market data if available
+                from main import _last_market_data
+                md = _last_market_data.get(symbol)
+                if md and md.account_balance > 0:
+                    drawdown_pct = abs(min(0, daily_pnl)) / md.account_balance * 100
+                    if drawdown_pct >= MAX_DAILY_DRAWDOWN_PCT:
+                        await query.message.reply_text(
+                            f"\U0001f6ab {symbol} TRADE BLOCKED \u2014 Daily Drawdown Limit\n"
+                            f"\u2501" * 20 + "\n"
+                            f"\U0001f4b0 Daily P&L: ${daily_pnl:+.2f} ({drawdown_pct:.1f}% drawdown)\n"
+                            f"\U0001f6d1 Limit: {MAX_DAILY_DRAWDOWN_PCT}% of balance (${md.account_balance:,.0f})\n\n"
+                            f"No more trades today. Protect your account."
+                        )
+                        logger.info("[%s] Trade BLOCKED by daily drawdown: $%.2f (%.1f%%)",
+                                    symbol, daily_pnl, drawdown_pct)
+                        return
+            except Exception as e:
+                logger.error("Drawdown check failed: %s", e)
+
+            # --- Max Open Trades Check ---
+            try:
+                open_trades = get_open_trades()
+                if len(open_trades) >= MAX_OPEN_TRADES:
+                    open_symbols = ", ".join(t["symbol"] for t in open_trades)
+                    await query.message.reply_text(
+                        f"\U0001f6ab {symbol} TRADE BLOCKED \u2014 Max Open Trades\n"
+                        f"\u2501" * 20 + "\n"
+                        f"\U0001f4ca Open trades: {len(open_trades)}/{MAX_OPEN_TRADES}\n"
+                        f"\U0001f4b1 Currently open: {open_symbols}\n\n"
+                        f"Close an existing position first."
+                    )
+                    logger.info("[%s] Trade BLOCKED by max open trades: %d/%d",
+                                symbol, len(open_trades), MAX_OPEN_TRADES)
+                    return
+            except Exception as e:
+                logger.error("Open trades check failed: %s", e)
+
+            # --- Correlation Filter ---
+            try:
+                corr_warning = check_correlation_conflict(symbol, setup.bias)
+                if corr_warning:
+                    await query.message.reply_text(
+                        f"\U0001f6ab {symbol} TRADE BLOCKED \u2014 Correlation Risk\n"
+                        f"\u2501" * 20 + "\n"
+                        f"\u26a0\ufe0f {corr_warning}\n\n"
+                        f"Taking the same directional exposure on a currency "
+                        f"doubles your risk. Close the existing position first."
+                    )
+                    logger.info("[%s] Trade BLOCKED by correlation filter: %s",
+                                symbol, corr_warning)
+                    return
+            except Exception as e:
+                logger.error("Correlation check failed: %s", e)
 
             trade_id = uuid.uuid4().hex[:8]
             pending = PendingTrade(
@@ -246,7 +307,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if _trade_queue_callback:
                 _trade_queue_callback(pending)
 
-                # Log to performance tracker
+                # Log to performance tracker (with full AI reasoning — Feature 6)
                 try:
                     log_trade_queued(
                         trade_id=trade_id,
@@ -265,6 +326,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         rr_tp2=setup.rr_tp2,
                         h1_trend=setup.h1_trend,
                         counter_trend=setup.counter_trend,
+                        raw_response=analysis.raw_response,
                     )
                 except Exception as e:
                     logger.error("Failed to log trade: %s", e)
@@ -493,6 +555,56 @@ async def _cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+async def _cmd_drawdown(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /drawdown command — show daily P&L and risk status."""
+    chat_id = str(update.effective_chat.id)
+    if TELEGRAM_CHAT_ID and chat_id != TELEGRAM_CHAT_ID:
+        await update.message.reply_text("Unauthorized.")
+        return
+
+    daily = get_daily_pnl()
+    open_trades = get_open_trades()
+
+    # Get account balance from latest market data
+    balance_str = "unknown"
+    drawdown_pct = 0.0
+    limit_pct = MAX_DAILY_DRAWDOWN_PCT
+    try:
+        from main import _last_market_data
+        if _last_market_data:
+            md = next(iter(_last_market_data.values()))
+            if md.account_balance > 0:
+                balance_str = f"${md.account_balance:,.2f}"
+                drawdown_pct = abs(min(0, daily["daily_pnl"])) / md.account_balance * 100
+    except Exception:
+        pass
+
+    pnl_emoji = "\U0001f7e2" if daily["daily_pnl"] >= 0 else "\U0001f534"
+    status_emoji = "\u2705" if drawdown_pct < limit_pct else "\U0001f6d1"
+
+    lines = [
+        "\U0001f4ca Daily Risk Dashboard",
+        "\u2501" * 25,
+        "",
+        f"\U0001f4b0 Account Balance: {balance_str}",
+        f"{pnl_emoji} Daily P&L: ${daily['daily_pnl']:+.2f}",
+        f"\U0001f4c9 Drawdown: {drawdown_pct:.2f}% / {limit_pct}% limit",
+        f"{status_emoji} Status: {'TRADING ALLOWED' if drawdown_pct < limit_pct else 'BLOCKED — limit reached'}",
+        "",
+        f"\U0001f4ca Closed today: {daily['closed_trades_today']}",
+        f"\U0001f4b1 Open trades: {len(open_trades)}/{MAX_OPEN_TRADES}",
+    ]
+
+    if open_trades:
+        lines.append("")
+        lines.append("Open positions:")
+        for t in open_trades:
+            direction = "\U0001f7e2" if t["bias"] == "long" else "\U0001f534"
+            lines.append(f"  {direction} {t['symbol']} {t['bias'].upper()} ({t.get('confidence', '?')})")
+
+    await update.message.reply_text("\n".join(lines))
+
+
 async def _cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /help command."""
     msg = (
@@ -502,6 +614,7 @@ async def _cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Commands:\n"
         "/scan - Re-scan last pair or /scan GBPJPY\n"
         "/stats - Performance stats or /stats GBPJPY 7\n"
+        "/drawdown - Daily P&L and risk status\n"
         "/news - Show upcoming high-impact news events\n"
         "/status - Show bot status for all pairs\n"
         "/help - Show this help message\n\n"
@@ -509,8 +622,9 @@ async def _cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "\u2022 London Open (08:00 CET)\n"
         "\u2022 NY Open (14:30 CET)\n\n"
         "Trade setups include Execute/Skip buttons.\n"
-        "FTMO news filter auto-blocks trades near high-impact events.\n"
-        "Supports multiple pairs — attach the EA to each chart."
+        "Risk management: FTMO news filter, daily drawdown limit,\n"
+        "correlation filter, max open trades cap.\n"
+        "Supports multiple pairs \u2014 attach the EA to each chart."
     )
     await update.message.reply_text(msg)
 
@@ -623,6 +737,7 @@ def create_bot_app() -> Application:
     _app.add_handler(CommandHandler("start", _cmd_start))
     _app.add_handler(CommandHandler("scan", _cmd_scan))
     _app.add_handler(CommandHandler("stats", _cmd_stats))
+    _app.add_handler(CommandHandler("drawdown", _cmd_drawdown))
     _app.add_handler(CommandHandler("news", _cmd_news))
     _app.add_handler(CommandHandler("status", _cmd_status))
     _app.add_handler(CommandHandler("help", _cmd_help))
