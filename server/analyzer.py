@@ -589,8 +589,9 @@ async def analyze_charts_full(
     thinking_config = {"type": "enabled", "budget_tokens": 10000}
 
     try:
-        logger.info("[%s] Opus full analysis (web_search=%s, thinking=10k)...", symbol, use_web_search)
-        response = await client.messages.create(
+        logger.info("[%s] Opus full analysis (web_search=%s, thinking=10k, streaming)...", symbol, use_web_search)
+        # Streaming required for extended thinking with large max_tokens
+        async with client.messages.stream(
             model="claude-opus-4-20250514",
             max_tokens=16000,
             thinking=thinking_config,
@@ -603,7 +604,8 @@ async def analyze_charts_full(
             ],
             tools=tools if tools else anthropic.NOT_GIVEN,
             messages=[{"role": "user", "content": user_content}],
-        )
+        ) as stream:
+            response = await stream.get_final_message()
 
         raw_text = ""
         for block in response.content:
