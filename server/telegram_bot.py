@@ -71,7 +71,11 @@ def _format_setup_message(setup: TradeSetup, summary: str, symbol: str, digits: 
         "\u2501" * 20,
     ]
 
-    if setup.h1_trend:
+    # Trend alignment (D1/H1/M5 score)
+    if setup.trend_alignment:
+        align_emoji = "\U0001f7e2" if setup.trend_alignment.startswith("3/3") else "\U0001f7e1" if setup.trend_alignment.startswith("2/3") else "\U0001f534"
+        lines.append(f"{align_emoji} Trend: {setup.trend_alignment}")
+    elif setup.h1_trend:
         trend_emoji = {
             "bullish": "\U0001f7e2",
             "bearish": "\U0001f534",
@@ -82,6 +86,16 @@ def _format_setup_message(setup: TradeSetup, summary: str, symbol: str, digits: 
         lines.append(f"\U0001f4cd Zone: {setup.price_zone.upper()}")
     if setup.counter_trend:
         lines.append("\u26a0\ufe0f COUNTER-TREND TRADE")
+
+    # Entry distance & status
+    if setup.entry_status:
+        status_emoji = {
+            "at_zone": "\U0001f7e2",
+            "approaching": "\U0001f7e1",
+            "requires_pullback": "\U0001f534",
+        }.get(setup.entry_status, "")
+        dist_text = f"{setup.entry_distance_pips:.0f}p away" if setup.entry_distance_pips else ""
+        lines.append(f"{status_emoji} Entry: {setup.entry_status.upper().replace('_', ' ')}" + (f" ({dist_text})" if dist_text else ""))
 
     lines += [
         "",
@@ -97,6 +111,13 @@ def _format_setup_message(setup: TradeSetup, summary: str, symbol: str, digits: 
 
     for reason in setup.confluence:
         lines.append(f"\u2022 {reason}")
+
+    # Negative factors (risks working against the trade)
+    if setup.negative_factors:
+        lines.append("")
+        lines.append("Risks:")
+        for factor in setup.negative_factors:
+            lines.append(f"\u26a0\ufe0f {factor}")
 
     if setup.news_warning:
         lines.append("")

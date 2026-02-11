@@ -122,7 +122,7 @@ Use the provided market data to identify key levels:
 Propose setups that satisfy these criteria:
 1. D1 trend-aligned preferred. Counter-trend is allowed if you see a BOS/ChoCH reversal signal on H1 or M5
 2. Entry near a key level (order block, FVG, session level, or swing level)
-3. Minimum 1:1.5 R:R on TP1
+3. Minimum 1:1.2 R:R on TP1
 4. At least 2 confluence factors
 5. Clear invalidation level
 
@@ -134,6 +134,33 @@ For counter-trend setups:
 Setups from equilibrium zone are acceptable if there is a clear directional trigger (BOS, FVG fill, session level sweep).
 
 IMPORTANT: Your goal is to find tradeable setups. Most sessions have at least one valid entry — look harder before saying "no trade". Even a cautious low-confidence setup with a clear SL is better than no setup.
+
+### Step 6b — Trend Alignment Score
+For each setup, assess D1/H1/M5 trend direction and compute an alignment score:
+- Score = how many of D1/H1/M5 agree with the trade bias (e.g., "3/3 bearish" if all bearish for a short)
+- Example: D1 bearish, H1 bearish, M5 bullish → 2/3 bearish for a short → "2/3 bearish (M5 diverging)"
+- Include this as "trend_alignment" in the JSON output and set "d1_trend" to "bullish"/"bearish"/"ranging"
+
+### Step 6c — Entry Distance & Status
+For each setup, calculate how far price currently is from the entry zone:
+- "entry_distance_pips": distance from current bid to entry zone midpoint, in pips
+- "entry_status": classify as:
+  - "at_zone" = price is within or very close to the entry zone (<10 pips)
+  - "approaching" = price is moving toward entry zone (10-40 pips away)
+  - "requires_pullback" = price needs to retrace significantly to reach entry (>40 pips)
+
+### Step 6d — Negative Factors
+For EVERY setup, identify 1-3 factors that work AGAINST the trade. Be honest — this helps the trader assess risk:
+- Examples: "D1 trend opposes trade", "RSI overbought", "Price far from entry zone", "Asian session — low volume",
+  "Near untested supply zone", "Wide spread", "H1 shows no clear BOS", "Counter-trend without strong reversal signal"
+- Include as "negative_factors" array in the JSON output
+
+### Step 6e — Level Validation
+Apply these rules when evaluating support/resistance levels:
+- A level that has been tested 3+ times is WEAKENED — more likely to break on the next test
+- Distinguish between: "untested" (fresh, strongest), "tested once" (confirmed), "tested 2x" (still valid), "tested 3x+" (weakened, likely to break)
+- A level being tested RIGHT NOW is not the same as a level price bounced from in the past
+- If your entry zone is at a weakened level (3+ tests), note this in negative_factors
 
 ### Step 7 — NO TRADE Decision
 Return an EMPTY setups array ONLY if:
@@ -165,7 +192,12 @@ Respond with ONLY valid JSON matching this structure:
       "news_warning": "description or null",
       "counter_trend": true or false,
       "h1_trend": "bullish" or "bearish" or "ranging",
-      "price_zone": "premium" or "discount" or "equilibrium"
+      "d1_trend": "bullish" or "bearish" or "ranging",
+      "trend_alignment": "3/3 bearish" or "2/3 bullish (M5 diverging)" etc,
+      "price_zone": "premium" or "discount" or "equilibrium",
+      "entry_distance_pips": number (pips from current price to entry zone midpoint),
+      "entry_status": "at_zone" or "approaching" or "requires_pullback",
+      "negative_factors": ["factor1", "factor2"]
     }}
   ],
   "h1_trend_analysis": "2-3 sentences describing D1+H1 swing structure and dominant trend",

@@ -69,7 +69,12 @@ class TradeSetup(BaseModel):
     news_warning: Optional[str] = None
     counter_trend: bool = False
     h1_trend: str = ""
+    d1_trend: str = ""
+    trend_alignment: str = ""  # e.g. "3/3 bearish" or "2/3 bullish (M5 diverging)"
     price_zone: str = ""
+    entry_distance_pips: float = 0.0
+    entry_status: str = ""  # "at_zone", "approaching", "requires_pullback"
+    negative_factors: list[str] = []
 
 
 class AnalysisResult(BaseModel):
