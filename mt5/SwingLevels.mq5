@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "AI Trade Analyst Bot"
 #property link      ""
-#property version   "1.10"
+#property version   "2.00"
 #property indicator_chart_window
 #property indicator_plots   0
 #property indicator_buffers 0
@@ -13,6 +13,7 @@
 //--- Input parameters
 input int      InpLookback     = 3;             // Swing Lookback (bars each side)
 input int      InpMaxLines     = 15;            // Max Lines on Chart
+input int      InpMinDistPips  = 30;            // Min Distance Between Levels (pips)
 input color    InpHighColor    = clrRed;        // Swing High Line Color
 input color    InpLowColor     = clrDodgerBlue; // Swing Low Line Color
 input int      InpLabelSize    = 7;             // Price Label Font Size
@@ -28,8 +29,8 @@ int    g_lastBars = 0;
 int OnInit()
 {
    g_lastBars = 0;
-   Print("SwingLevels v1.10 initialized (lookback=", InpLookback,
-         ", max=", InpMaxLines, ")");
+   Print("SwingLevels v2.00 initialized (lookback=", InpLookback,
+         ", max=", InpMaxLines, ", minDist=", InpMinDistPips, " pips)");
    return(INIT_SUCCEEDED);
 }
 
@@ -74,6 +75,14 @@ int OnCalculate(const int rates_total,
    //--- Remove old objects
    ObjectsDeleteAll(0, g_prefix);
 
+   //--- Calculate minimum distance in price terms
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   int    digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   //--- For JPY pairs (3 digits): 1 pip = 0.01 = 1 * point (point=0.001, pip=10*point)
+   //--- For 5-digit pairs: 1 pip = 0.0001 = 10 * point
+   double pipSize = (digits == 3 || digits == 2) ? (point * 10) : (point * 10);
+   double minDist = InpMinDistPips * pipSize;
+
    //--- Find swing highs and lows
    //--- Store as: price, time, type ("H" or "L")
    //--- Scan from recent to old, collect up to a reasonable number
@@ -85,8 +94,6 @@ int OnCalculate(const int rates_total,
    ArrayResize(prices, 0);
    ArrayResize(times, 0);
    ArrayResize(types, 0);
-
-   double currentClose = close[0];
 
    for(int i = InpLookback; i < maxScan; i++)
    {
@@ -103,20 +110,43 @@ int OnCalculate(const int rates_total,
 
       if(isHigh)
       {
-         //--- Skip broken levels (price closed above this high)
-         if(InpRemoveBroken && currentClose > high[i])
+         //--- Check if level was broken: did ANY bar AFTER this swing close above it?
+         bool broken = false;
+         if(InpRemoveBroken)
          {
-            // Level broken, skip
+            for(int k = i - 1; k >= 0; k--)
+            {
+               if(close[k] > high[i])
+               {
+                  broken = true;
+                  break;
+               }
+            }
          }
-         else
+
+         if(!broken)
          {
-            int sz = ArraySize(prices);
-            ArrayResize(prices, sz + 1);
-            ArrayResize(times, sz + 1);
-            ArrayResize(types, sz + 1);
-            prices[sz] = high[i];
-            times[sz]  = time[i];
-            types[sz]  = 1;
+            //--- Check minimum distance from existing levels
+            bool tooClose = false;
+            for(int n = 0; n < ArraySize(prices); n++)
+            {
+               if(MathAbs(prices[n] - high[i]) < minDist)
+               {
+                  tooClose = true;
+                  break;
+               }
+            }
+
+            if(!tooClose)
+            {
+               int sz = ArraySize(prices);
+               ArrayResize(prices, sz + 1);
+               ArrayResize(times, sz + 1);
+               ArrayResize(types, sz + 1);
+               prices[sz] = high[i];
+               times[sz]  = time[i];
+               types[sz]  = 1;
+            }
          }
       }
 
@@ -133,20 +163,43 @@ int OnCalculate(const int rates_total,
 
       if(isLow)
       {
-         //--- Skip broken levels (price closed below this low)
-         if(InpRemoveBroken && currentClose < low[i])
+         //--- Check if level was broken: did ANY bar AFTER this swing close below it?
+         bool broken = false;
+         if(InpRemoveBroken)
          {
-            // Level broken, skip
+            for(int k = i - 1; k >= 0; k--)
+            {
+               if(close[k] < low[i])
+               {
+                  broken = true;
+                  break;
+               }
+            }
          }
-         else
+
+         if(!broken)
          {
-            int sz = ArraySize(prices);
-            ArrayResize(prices, sz + 1);
-            ArrayResize(times, sz + 1);
-            ArrayResize(types, sz + 1);
-            prices[sz] = low[i];
-            times[sz]  = time[i];
-            types[sz]  = -1;
+            //--- Check minimum distance from existing levels
+            bool tooClose = false;
+            for(int n = 0; n < ArraySize(prices); n++)
+            {
+               if(MathAbs(prices[n] - low[i]) < minDist)
+               {
+                  tooClose = true;
+                  break;
+               }
+            }
+
+            if(!tooClose)
+            {
+               int sz = ArraySize(prices);
+               ArrayResize(prices, sz + 1);
+               ArrayResize(times, sz + 1);
+               ArrayResize(types, sz + 1);
+               prices[sz] = low[i];
+               times[sz]  = time[i];
+               types[sz]  = -1;
+            }
          }
       }
    }
@@ -178,10 +231,10 @@ int OnCalculate(const int rates_total,
       ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
 
       //--- Small price label (offset slightly above the line so it's readable)
-      double labelOffset = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 30;  // ~3 pips above
+      double labelOffset = point * 30;  // ~3 pips above
       string lblName = g_prefix + "T" + IntegerToString(i);
       ObjectCreate(0, lblName, OBJ_TEXT, 0, time[0], prices[i] + labelOffset);
-      ObjectSetString(0, lblName, OBJPROP_TEXT, DoubleToString(prices[i], (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)));
+      ObjectSetString(0, lblName, OBJPROP_TEXT, DoubleToString(prices[i], digits));
       ObjectSetString(0, lblName, OBJPROP_FONT, "Arial");
       ObjectSetInteger(0, lblName, OBJPROP_FONTSIZE, InpLabelSize);
       ObjectSetInteger(0, lblName, OBJPROP_COLOR, clr);
@@ -193,7 +246,8 @@ int OnCalculate(const int rates_total,
    ChartRedraw(0);
 
    if(prev_calculated == 0)
-      Print("SwingLevels: Drew ", drawCount, " levels (", total, " found, max ", InpMaxLines, ")");
+      Print("SwingLevels: Drew ", drawCount, " levels (", total, " found, max ", InpMaxLines,
+            ", minDist=", InpMinDistPips, " pips)");
 
    return rates_total;
 }
