@@ -1,3 +1,4 @@
+# v2.0 — H4 timeframe + ICT criteria
 """Performance tracker — logs every trade and tracks outcomes.
 
 Uses SQLite for persistence. Tracks:

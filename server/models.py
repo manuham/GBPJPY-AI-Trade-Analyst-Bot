@@ -1,3 +1,4 @@
+# v2.0 — H4 timeframe + ICT criteria
 from __future__ import annotations
 
 from typing import Optional
