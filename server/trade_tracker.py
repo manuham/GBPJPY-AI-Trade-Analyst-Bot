@@ -112,11 +112,21 @@ def init_db():
     """Initialize the database schema."""
     with _get_db() as conn:
         conn.executescript(_SCHEMA)
-        # Migration: add raw_response column for trade journal (Feature 6)
-        try:
-            conn.execute("ALTER TABLE trades ADD COLUMN raw_response TEXT DEFAULT ''")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
+        # Migrations: add columns that may not exist yet
+        _migrations = [
+            "ALTER TABLE trades ADD COLUMN raw_response TEXT DEFAULT ''",
+            "ALTER TABLE trades ADD COLUMN trend_alignment TEXT DEFAULT ''",
+            "ALTER TABLE trades ADD COLUMN d1_trend TEXT DEFAULT ''",
+            "ALTER TABLE trades ADD COLUMN entry_status TEXT DEFAULT ''",
+            "ALTER TABLE trades ADD COLUMN entry_distance_pips REAL DEFAULT 0",
+            "ALTER TABLE trades ADD COLUMN negative_factors TEXT DEFAULT ''",
+            "ALTER TABLE trades ADD COLUMN price_zone TEXT DEFAULT ''",
+        ]
+        for migration in _migrations:
+            try:
+                conn.execute(migration)
+            except sqlite3.OperationalError:
+                pass  # Column already exists
     logger.info("Trade tracker database initialized at %s", DB_PATH)
 
 
@@ -143,6 +153,12 @@ def log_trade_queued(
     counter_trend: bool = False,
     market_summary: str = "",
     raw_response: str = "",
+    trend_alignment: str = "",
+    d1_trend: str = "",
+    entry_status: str = "",
+    entry_distance_pips: float = 0,
+    negative_factors: str = "",
+    price_zone: str = "",
 ):
     """Log a trade when the user clicks Execute on Telegram."""
     now = datetime.now(timezone.utc).isoformat()
@@ -153,14 +169,16 @@ def log_trade_queued(
              entry_min, entry_max, stop_loss, tp1, tp2,
              sl_pips, tp1_pips, tp2_pips, rr_tp1, rr_tp2,
              status, created_at, h1_trend, counter_trend, market_summary,
-             raw_response)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)""",
+             raw_response, trend_alignment, d1_trend, entry_status,
+             entry_distance_pips, negative_factors, price_zone)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 trade_id, symbol, bias, confidence, session,
                 entry_min, entry_max, stop_loss, tp1, tp2,
                 sl_pips, tp1_pips, tp2_pips, rr_tp1, rr_tp2,
                 now, h1_trend, int(counter_trend), market_summary,
-                raw_response,
+                raw_response, trend_alignment, d1_trend, entry_status,
+                entry_distance_pips, negative_factors, price_zone,
             ),
         )
     logger.info("[%s] Trade %s logged as QUEUED", symbol, trade_id)
@@ -555,6 +573,8 @@ def get_recent_closed_for_pair(symbol: str, limit: int = 10) -> list[dict]:
         rows = conn.execute(
             "SELECT id, bias, confidence, outcome, pnl_pips, pnl_money, "
             "sl_pips, tp1_pips, tp2_pips, h1_trend, counter_trend, "
+            "trend_alignment, d1_trend, entry_status, entry_distance_pips, "
+            "negative_factors, price_zone, "
             "created_at, closed_at "
             "FROM trades WHERE symbol = ? AND status = 'closed' "
             "ORDER BY closed_at DESC LIMIT ?",

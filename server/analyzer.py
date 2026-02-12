@@ -252,9 +252,13 @@ Respond with ONLY this JSON:
 # Performance feedback builder (Feature 5)
 # ---------------------------------------------------------------------------
 def _build_performance_feedback(symbol: str) -> Optional[str]:
-    """Build performance feedback text from recent closed trades for this pair."""
+    """Build rich performance feedback from recent closed trades for this pair.
+
+    Includes per-trade details AND pattern analysis so the AI can learn
+    what works and what doesn't.
+    """
     try:
-        trades = get_recent_closed_for_pair(symbol, limit=10)
+        trades = get_recent_closed_for_pair(symbol, limit=20)
     except Exception as e:
         logger.warning("Failed to get performance history for %s: %s", symbol, e)
         return None
@@ -262,7 +266,8 @@ def _build_performance_feedback(symbol: str) -> Optional[str]:
     if not trades:
         return None
 
-    lines = [f"Your last {len(trades)} completed trades for {symbol}:"]
+    # --- Section 1: Per-trade details ---
+    lines = [f"## Your last {len(trades)} completed trades for {symbol}"]
     wins = 0
     losses = 0
     total_pnl = 0.0
@@ -272,12 +277,20 @@ def _build_performance_feedback(symbol: str) -> Optional[str]:
         pnl = t.get("pnl_pips") or 0
         bias = (t.get("bias") or "?").upper()
         conf = t.get("confidence") or "?"
-        trend = t.get("h1_trend") or "?"
-        ct = " [COUNTER-TREND]" if t.get("counter_trend") else ""
+        trend_align = t.get("trend_alignment") or ""
+        h1_trend = t.get("h1_trend") or "?"
+        entry_st = t.get("entry_status") or "?"
+        zone = t.get("price_zone") or "?"
+        ct = " [CT]" if t.get("counter_trend") else ""
+        neg = t.get("negative_factors") or ""
         date_str = (t.get("closed_at") or "")[:10]
 
         emoji = {"full_win": "W", "partial_win": "PW", "loss": "L"}.get(outcome, outcome)
-        lines.append(f"  {i}. {emoji} {bias} ({conf}) {pnl:+.0f}p — {trend}{ct} — {date_str}")
+        trend_info = trend_align if trend_align else h1_trend
+        detail = f"  {i}. {emoji} {bias} ({conf}) {pnl:+.0f}p | {trend_info} | {zone} | entry:{entry_st}{ct}"
+        if neg and outcome == "loss":
+            detail += f" | risks: {neg}"
+        lines.append(detail)
 
         if outcome in ("full_win", "partial_win"):
             wins += 1
@@ -287,8 +300,64 @@ def _build_performance_feedback(symbol: str) -> Optional[str]:
 
     total = wins + losses
     wr = (wins / total * 100) if total > 0 else 0
-    lines.append(f"\nWin rate: {wr:.0f}% ({wins}W / {losses}L) | Net: {total_pnl:+.0f} pips")
-    lines.append("Learn from these results. Avoid patterns that keep losing. Double down on what works.")
+    lines.append(f"\nOverall: {wr:.0f}% win rate ({wins}W / {losses}L) | Net: {total_pnl:+.0f} pips")
+
+    # --- Section 2: Pattern analysis (only if enough data) ---
+    if total >= 3:
+        lines.append("\n## Pattern Analysis")
+
+        def _wr_line(label, trade_list):
+            w = sum(1 for t in trade_list if t.get("outcome") in ("full_win", "partial_win"))
+            n = sum(1 for t in trade_list if t.get("outcome") in ("full_win", "partial_win", "loss"))
+            if n > 0:
+                lines.append(f"  {label}: {w/n*100:.0f}% ({w}/{n})")
+
+        # Counter-trend vs trend-aligned
+        ct_trades = [t for t in trades if t.get("counter_trend")]
+        ta_trades = [t for t in trades if not t.get("counter_trend")]
+        if ct_trades:
+            _wr_line("Counter-trend", ct_trades)
+        if ta_trades:
+            _wr_line("Trend-aligned", ta_trades)
+
+        # By trend alignment score
+        for prefix in ("3/3", "2/3", "1/3"):
+            aligned = [t for t in trades if (t.get("trend_alignment") or "").startswith(prefix)]
+            if aligned:
+                _wr_line(f"{prefix} aligned", aligned)
+
+        # By confidence
+        for conf in ("high", "medium", "low"):
+            conf_trades = [t for t in trades if t.get("confidence") == conf]
+            if conf_trades:
+                _wr_line(f"{conf.upper()} confidence", conf_trades)
+
+        # By entry status
+        for status in ("at_zone", "approaching", "requires_pullback"):
+            st_trades = [t for t in trades if t.get("entry_status") == status]
+            if st_trades:
+                _wr_line(f"Entry '{status}'", st_trades)
+
+        # By price zone
+        for zone in ("premium", "discount", "equilibrium"):
+            z_trades = [t for t in trades if t.get("price_zone") == zone]
+            if z_trades:
+                _wr_line(f"{zone.upper()} zone", z_trades)
+
+        # By bias direction
+        for bias_dir in ("long", "short"):
+            b_trades = [t for t in trades if t.get("bias") == bias_dir]
+            if b_trades:
+                _wr_line(bias_dir.upper(), b_trades)
+
+    # --- Section 3: Actionable instructions ---
+    lines.append("\n## Instructions")
+    lines.append("Use the patterns above to improve your current analysis:")
+    lines.append("- If a pattern consistently loses, AVOID it or rate confidence LOW")
+    lines.append("- If a pattern consistently wins, actively LOOK FOR similar setups")
+    lines.append("- If 'requires_pullback' entries lose often, prefer 'at_zone' entries")
+    lines.append("- If counter-trend trades lose, only propose them with very strong reversal evidence")
+    lines.append("- Mention any relevant pattern insight in your market_summary")
 
     return "\n".join(lines)
 
