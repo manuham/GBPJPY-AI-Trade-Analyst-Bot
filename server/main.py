@@ -1,10 +1,12 @@
-# v2.0 — H4 timeframe + ICT criteria
+# v3.0 — Smart entry confirmation + London Kill Zone
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
 import time
+import uuid
+from datetime import datetime, timezone, timedelta
 
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -15,8 +17,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import config
-from analyzer import analyze_charts
-from models import AnalysisResult, MarketData, PendingTrade, TradeExecutionReport
+from analyzer import analyze_charts, confirm_entry
+from models import AnalysisResult, MarketData, PendingTrade, WatchTrade, TradeExecutionReport
 from pair_profiles import get_profile
 from telegram_bot import (
     create_bot_app,
@@ -48,9 +50,14 @@ _analysis_lock = asyncio.Lock()
 # Trade execution queue — one pending trade per symbol
 _pending_trades: dict[str, PendingTrade] = {}           # {"GBPJPY": PendingTrade(...)}
 
+# Watch trades — EA monitors price, confirms via Haiku before entry
+_watch_trades: dict[str, WatchTrade] = {}               # {"GBPJPY": WatchTrade(...)}
 
 # Trade expiry window — all EAs (leader + followers) have this long to pick up a trade
 PENDING_TRADE_TTL_SECONDS = 60
+
+# Auto-queue: minimum checklist score to auto-watch (skip Execute button)
+AUTO_QUEUE_MIN_CHECKLIST = 7
 
 
 def queue_pending_trade(trade: PendingTrade):
@@ -107,7 +114,7 @@ async def _run_scan_from_telegram(symbol: str = ""):
 async def _run_analysis(
     d1: bytes, h4: bytes, h1: bytes, m5: bytes, market_data: MarketData
 ):
-    """Run analysis pipeline and send results via Telegram."""
+    """Run analysis pipeline, auto-queue qualifying setups as watches, send to Telegram."""
     symbol = market_data.symbol
 
     async with _analysis_lock:
@@ -119,11 +126,60 @@ async def _run_analysis(
             "[%s] Analysis complete: %d setups found", symbol, len(result.setups)
         )
 
+        # --- Auto-queue qualifying setups as watch trades ---
+        auto_queued_indices: set[int] = set()
+        for i, setup in enumerate(result.setups):
+            checklist_num = _parse_checklist_score(setup.checklist_score)
+            if checklist_num >= AUTO_QUEUE_MIN_CHECKLIST:
+                # Run risk filters before auto-queuing
+                from telegram_bot import check_risk_filters
+                passed, reason = await check_risk_filters(symbol, setup)
+                if passed:
+                    watch = _create_watch_trade(symbol, setup)
+                    _watch_trades[symbol] = watch
+                    auto_queued_indices.add(i)
+                    logger.info("[%s] Auto-queued watch: %s %s (checklist %s)",
+                                symbol, setup.bias.upper(), watch.id, setup.checklist_score)
+                    try:
+                        from telegram_bot import send_watch_started
+                        await send_watch_started(watch)
+                    except Exception as e:
+                        logger.error("[%s] Failed to send watch notification: %s", symbol, e)
+                else:
+                    logger.info("[%s] Setup %d blocked by risk filter: %s", symbol, i, reason)
+
         try:
-            await send_analysis(result)
+            await send_analysis(result, auto_queued_indices=auto_queued_indices)
             logger.info("[%s] Telegram notifications sent", symbol)
         except Exception as e:
             logger.error("[%s] Failed to send Telegram notifications: %s", symbol, e)
+
+
+def _parse_checklist_score(score: str) -> int:
+    """Parse '10/12' → 10. Returns 0 if unparseable."""
+    try:
+        return int(score.split("/")[0]) if "/" in score else 0
+    except (ValueError, IndexError):
+        return 0
+
+
+def _create_watch_trade(symbol: str, setup) -> WatchTrade:
+    """Create a WatchTrade from a TradeSetup."""
+    return WatchTrade(
+        id=uuid.uuid4().hex[:8],
+        symbol=symbol,
+        bias=setup.bias,
+        entry_min=setup.entry_min,
+        entry_max=setup.entry_max,
+        stop_loss=setup.stop_loss,
+        tp1=setup.tp1,
+        tp2=setup.tp2,
+        sl_pips=setup.sl_pips,
+        confidence=setup.confidence,
+        confluence=setup.confluence[:3] if setup.confluence else [],
+        checklist_score=setup.checklist_score,
+        created_at=time.time(),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +204,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error("Failed to start Telegram bot: %s", e)
 
+    # Start watch expiry background task
+    expiry_task = asyncio.create_task(_watch_expiry_loop())
+
     yield
+
+    # Cancel background task
+    expiry_task.cancel()
 
     # Shutdown
     logger.info("Shutting down...")
@@ -169,7 +231,7 @@ async def lifespan(app: FastAPI):
 # ---------------------------------------------------------------------------
 app = FastAPI(
     title="AI Trade Analyst",
-    version="2.0.0",
+    version="3.0.0",
     lifespan=lifespan,
 )
 
@@ -183,10 +245,23 @@ async def health():
         remaining = max(0, PENDING_TRADE_TTL_SECONDS - age)
         pending_info[s] = {"trade_id": t.id, "ttl_remaining": remaining}
 
+    # Show active watch trades
+    watch_info = {}
+    for s, w in _watch_trades.items():
+        age = int(time.time() - w.created_at) if w.created_at else 0
+        watch_info[s] = {
+            "trade_id": w.id,
+            "bias": w.bias,
+            "status": w.status,
+            "confirmations": f"{w.confirmations_used}/{w.max_confirmations}",
+            "age_seconds": age,
+        }
+
     return {
         "status": "ok",
         "pairs_analyzed": list(_last_results.keys()),
         "pending_trades": pending_info,
+        "watch_trades": watch_info,
         "setups": {s: len(r.setups) for s, r in _last_results.items()},
     }
 
@@ -299,6 +374,152 @@ async def pending_trade(symbol: str = ""):
     return {"pending": False}
 
 
+@app.get("/watch_trade")
+async def watch_trade_endpoint(symbol: str = ""):
+    """MT5 EA polls this to get the current watch trade (zone to monitor).
+    Returns the entry zone levels so the EA can watch locally."""
+    watch = _watch_trades.get(symbol)
+    if watch and watch.status == "watching":
+        age = int(time.time() - watch.created_at) if watch.created_at else 0
+        return {
+            "has_watch": True,
+            "trade": watch.model_dump(),
+            "age_seconds": age,
+        }
+    return {"has_watch": False}
+
+
+@app.post("/confirm_entry")
+async def confirm_entry_endpoint(
+    screenshot_m1: UploadFile = File(...),
+    trade_id: str = Form(...),
+    symbol: str = Form(...),
+    bias: str = Form(...),
+    current_price: float = Form(...),
+    entry_min: float = Form(...),
+    entry_max: float = Form(...),
+):
+    """MT5 EA calls this when price reaches the entry zone.
+    Runs a Haiku M1 confirmation check before allowing entry."""
+    watch = _watch_trades.get(symbol)
+    if not watch or watch.id != trade_id:
+        return JSONResponse(
+            status_code=404,
+            content={"confirmed": False, "reasoning": "Watch trade not found or ID mismatch"},
+        )
+
+    if watch.status != "watching":
+        return {"confirmed": False, "reasoning": f"Watch is {watch.status}, not active"}
+
+    if watch.confirmations_used >= watch.max_confirmations:
+        watch.status = "rejected"
+        return {"confirmed": False, "reasoning": "Max confirmation attempts exhausted", "remaining_checks": 0}
+
+    # Read M1 screenshot
+    m1_bytes = await screenshot_m1.read()
+    logger.info("[%s] M1 confirmation request: trade=%s, price=%.3f (attempt %d/%d)",
+                symbol, trade_id, current_price, watch.confirmations_used + 1, watch.max_confirmations)
+
+    # Notify Telegram that zone was reached
+    try:
+        from telegram_bot import send_zone_reached
+        await send_zone_reached(watch, watch.confirmations_used + 1)
+    except Exception as e:
+        logger.error("[%s] Failed to send zone-reached notification: %s", symbol, e)
+
+    # Run Haiku confirmation
+    result = await confirm_entry(
+        screenshot_m1=m1_bytes,
+        symbol=symbol,
+        bias=bias,
+        current_price=current_price,
+        entry_min=entry_min,
+        entry_max=entry_max,
+        confluence=watch.confluence,
+    )
+
+    watch.confirmations_used += 1
+    confirmed = result.get("confirmed", False)
+    reasoning = result.get("reasoning", "")
+    remaining = watch.max_confirmations - watch.confirmations_used
+
+    # Notify Telegram of confirmation result
+    try:
+        from telegram_bot import send_confirmation_result
+        await send_confirmation_result(watch, confirmed, reasoning)
+    except Exception as e:
+        logger.error("[%s] Failed to send confirmation result: %s", symbol, e)
+
+    if confirmed:
+        # Convert watch → pending trade for MT5 to pick up via /pending_trade
+        watch.status = "confirmed"
+        pending = PendingTrade(
+            id=watch.id,
+            symbol=symbol,
+            bias=watch.bias,
+            entry_min=watch.entry_min,
+            entry_max=watch.entry_max,
+            stop_loss=watch.stop_loss,
+            tp1=watch.tp1,
+            tp2=watch.tp2,
+            sl_pips=watch.sl_pips,
+            confidence=watch.confidence,
+        )
+        queue_pending_trade(pending)
+
+        # Log to performance tracker
+        try:
+            from trade_tracker import log_trade_queued
+            analysis = _last_results.get(symbol)
+            # Find matching setup
+            setup = None
+            if analysis:
+                for s in analysis.setups:
+                    if s.bias == watch.bias and abs(s.entry_min - watch.entry_min) < 0.01:
+                        setup = s
+                        break
+
+            log_trade_queued(
+                trade_id=watch.id,
+                symbol=symbol,
+                bias=watch.bias,
+                entry_min=watch.entry_min,
+                entry_max=watch.entry_max,
+                stop_loss=watch.stop_loss,
+                tp1=watch.tp1,
+                tp2=watch.tp2,
+                sl_pips=watch.sl_pips,
+                confidence=watch.confidence,
+                tp1_pips=setup.tp1_pips if setup else 0,
+                tp2_pips=setup.tp2_pips if setup else 0,
+                rr_tp1=setup.rr_tp1 if setup else 0,
+                rr_tp2=setup.rr_tp2 if setup else 0,
+                h1_trend=setup.h1_trend if setup else "",
+                counter_trend=setup.counter_trend if setup else False,
+                raw_response=analysis.raw_response if analysis else "",
+                trend_alignment=setup.trend_alignment if setup else "",
+                d1_trend=setup.d1_trend if setup else "",
+                entry_status="at_zone",
+                entry_distance_pips=0,
+                negative_factors=", ".join(setup.negative_factors) if setup and setup.negative_factors else "",
+                price_zone=setup.price_zone if setup else "",
+                h4_trend=setup.h4_trend if setup else "",
+                checklist_score=watch.checklist_score,
+            )
+        except Exception as e:
+            logger.error("[%s] Failed to log confirmed trade: %s", symbol, e)
+
+        logger.info("[%s] M1 CONFIRMED — trade %s queued for execution", symbol, watch.id)
+        return {"confirmed": True, "reasoning": reasoning, "remaining_checks": remaining}
+    else:
+        if remaining <= 0:
+            watch.status = "rejected"
+            logger.info("[%s] M1 REJECTED — max attempts reached, watch cancelled", symbol)
+        else:
+            logger.info("[%s] M1 REJECTED — %d attempts remaining", symbol, remaining)
+        return {"confirmed": False, "reasoning": reasoning, "remaining_checks": remaining}
+
+
 @app.post("/trade_executed")
 async def trade_executed(report: TradeExecutionReport):
     """MT5 EA calls this after placing a trade.
@@ -391,6 +612,42 @@ async def telegram_webhook(request: Request):
     except Exception as e:
         logger.error("Webhook processing error: %s", e)
         return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
+# Watch expiry background task
+# ---------------------------------------------------------------------------
+async def _watch_expiry_loop():
+    """Expire active watches when the London Kill Zone ends (11:00 MEZ)."""
+    while True:
+        try:
+            await asyncio.sleep(60)  # Check every minute
+
+            # MEZ = UTC+1 (CET), MESZ = UTC+2 (CEST) — use UTC+1 for simplicity
+            now_mez = datetime.now(timezone(timedelta(hours=1)))
+            mez_hour = now_mez.hour
+
+            for symbol, watch in list(_watch_trades.items()):
+                if watch.status != "watching":
+                    continue
+
+                profile = get_profile(symbol)
+                kill_zone_end = profile.get("kill_zone_end_mez", 11)
+
+                if mez_hour >= kill_zone_end:
+                    watch.status = "expired"
+                    logger.info("[%s] Watch %s expired — Kill Zone ended (%d:00 MEZ)",
+                                symbol, watch.id, kill_zone_end)
+                    try:
+                        from telegram_bot import send_watch_expired
+                        await send_watch_expired(watch)
+                    except Exception as e:
+                        logger.error("[%s] Failed to send watch expiry notification: %s", symbol, e)
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error("Watch expiry loop error: %s", e)
 
 
 # ---------------------------------------------------------------------------

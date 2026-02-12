@@ -1,12 +1,13 @@
 //+------------------------------------------------------------------+
 //|                                                  AI_Analyst.mq5  |
-//|                   AI Trade Analyst Bot — Risk Management           |
+//|                   AI Trade Analyst Bot v6.0                        |
+//|                   Smart Entry: M1 Confirmation + London Kill Zone  |
 //|                   Break-even after TP1, trailing stop to TP1       |
 //|                   Leader/follower mode for multi-account           |
 //+------------------------------------------------------------------+
 #property copyright "AI Trade Analyst Bot"
 #property link      ""
-#property version   "5.00"
+#property version   "6.00"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -14,43 +15,48 @@
 //--- Input parameters
 input string   InpServerURL       = "http://127.0.0.1:8000/analyze"; // Server URL (analyze endpoint)
 input string   InpServerBase      = "http://127.0.0.1:8000";         // Server Base URL
-input int      InpLondonOpenHour  = 8;      // London Open Hour (CET)
-input int      InpLondonOpenMin   = 0;      // London Open Minute
-input int      InpNYOpenHour      = 14;     // NY Open Hour (CET)
-input int      InpNYOpenMin       = 30;     // NY Open Minute
-input int      InpTimezoneOffset  = 0;      // Timezone Offset (Server - CET) in hours
+input int      InpKillZoneStart   = 8;      // Kill Zone Start Hour (MEZ)
+input int      InpKillZoneStartMin= 0;      // Kill Zone Start Minute
+input int      InpKillZoneEnd     = 11;     // Kill Zone End Hour (MEZ) — watches expire here
+input int      InpTimezoneOffset  = 0;      // Timezone Offset (Server - MEZ) in hours
 input int      InpCooldownMinutes = 30;     // Cooldown after scan (minutes)
 input int      InpScreenshotWidth = 2560;   // Screenshot Width
 input int      InpScreenshotHeight= 1440;   // Screenshot Height
 input bool     InpManualTrigger   = false;  // Manual Trigger (set true to force scan)
 input double   InpRiskPercent     = 1.0;    // Risk % per trade
 input int      InpMagicNumber     = 888888; // Magic Number for trades
-input int      InpLondonEndHour   = 17;     // London session end (CET hour, cancels limit orders)
-input int      InpNYEndHour       = 22;     // NY session end (CET hour, cancels limit orders)
+input int      InpConfirmCooldown = 60;     // Seconds between M1 confirmation attempts
 input string   InpMode            = "leader";  // Mode: "leader" (analyze+trade) or "follower" (trade only)
 input string   InpSymbolOverride  = "";        // Symbol override for server (e.g. "GBPJPY" when broker uses "GBPJPYm")
 
 //--- Global variables
 datetime g_lastScanTime = 0;
-bool     g_londonScanned = false;
-bool     g_nyScanned     = false;
+bool     g_killZoneScanned = false;
 int      g_lastDay       = 0;
 string   g_screenshotDir;
 string   g_templateName;
 int      g_digits;         // Price digits for this symbol (e.g. 3 for JPY, 5 for EUR/USD, 2 for gold)
 double   g_pipSize;        // Size of 1 pip in price units (e.g. 0.01 for JPY, 0.0001 for EUR/USD)
 datetime g_lastPollTime  = 0;
+datetime g_lastWatchPoll = 0;
 string   g_lastTradeId   = "";  // Prevent re-executing the same trade
 
 //--- Leader/Follower mode
 bool     g_isLeader     = true;   // true = leader (analyze + trade), false = follower (trade only)
 string   g_serverSymbol = "";     // Symbol name used for server communication (may differ from _Symbol)
 
-//--- Pending limit order tracking (for session-based expiry)
-ulong    g_limitTicket1  = 0;   // TP1 limit order ticket
-ulong    g_limitTicket2  = 0;   // TP2 limit order ticket
-string   g_limitSession  = "";  // "London" or "NY" — which session placed the orders
-string   g_limitTradeId  = "";  // Trade ID for logging
+//--- Zone watching (replaces limit orders — smart entry via M1 confirmation)
+bool     g_hasWatch      = false;
+string   g_watchTradeId  = "";
+string   g_watchBias     = "";
+double   g_watchZoneMin  = 0;
+double   g_watchZoneMax  = 0;
+double   g_watchSL       = 0;
+double   g_watchTP1      = 0;
+double   g_watchTP2      = 0;
+double   g_watchSlPips   = 0;
+int      g_watchMaxChecks = 3;
+datetime g_lastConfirmTime = 0;  // Cooldown between confirmation attempts
 
 //--- Open position tracking (for close detection)
 ulong    g_posTicket1    = 0;   // TP1 position ticket (market orders)
@@ -73,7 +79,7 @@ CTrade g_trade;
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   Print(">>> AI Analyst v5.0 [", _Symbol, "] - Risk Management <<<");
+   Print(">>> AI Analyst v6.0 [", _Symbol, "] - Smart Entry + London Kill Zone <<<");
 
    //--- Determine mode
    g_isLeader = (InpMode != "follower");
@@ -123,12 +129,12 @@ int OnInit()
    if(g_isLeader)
    {
       Print("Server URL: ", InpServerURL);
-      Print("London Open: ", IntegerToString(InpLondonOpenHour), ":",
-            StringFormat("%02d", InpLondonOpenMin), " CET");
-      Print("NY Open: ", IntegerToString(InpNYOpenHour), ":",
-            StringFormat("%02d", InpNYOpenMin), " CET");
-      Print("Timezone offset (Server - CET): ", IntegerToString(InpTimezoneOffset), " hours");
+      Print("Kill Zone: ", IntegerToString(InpKillZoneStart), ":",
+            StringFormat("%02d", InpKillZoneStartMin), " - ",
+            IntegerToString(InpKillZoneEnd), ":00 MEZ");
+      Print("Timezone offset (Server - MEZ): ", IntegerToString(InpTimezoneOffset), " hours");
       Print("Cooldown: ", IntegerToString(InpCooldownMinutes), " minutes");
+      Print("M1 confirm cooldown: ", IntegerToString(InpConfirmCooldown), " seconds");
    }
 
    return(INIT_SUCCEEDED);
@@ -159,13 +165,21 @@ void OnTimer()
    TimeCurrent(dt);
    if(dt.day != g_lastDay)
    {
-      g_londonScanned = false;
-      g_nyScanned     = false;
-      g_lastDay       = dt.day;
+      g_killZoneScanned = false;
+      g_hasWatch        = false;
+      g_lastDay         = dt.day;
       Print("New day detected — scan flags reset.");
    }
 
-   //--- LEADER-ONLY: session scanning and analysis
+   //--- Convert current server time to MEZ
+   int serverHour = dt.hour;
+   int serverMin  = dt.min;
+   int mezHour = serverHour - InpTimezoneOffset;
+   int mezMin  = serverMin;
+   if(mezHour < 0)  mezHour += 24;
+   if(mezHour >= 24) mezHour -= 24;
+
+   //--- LEADER-ONLY: Kill Zone scanning
    if(g_isLeader)
    {
       //--- Check if manual trigger is set (fires once then respects cooldown)
@@ -176,55 +190,39 @@ void OnTimer()
             Print("Manual trigger detected via input parameter.");
             RunAnalysis("Manual");
          }
-         // Don't return here — still need to poll and check positions
       }
       else
       {
-         //--- Convert current server time to CET
-         int serverHour = dt.hour;
-         int serverMin  = dt.min;
-
-         //--- CET time = server time - offset
-         int cetHour = serverHour - InpTimezoneOffset;
-         int cetMin  = serverMin;
-
-         //--- Normalize hour
-         if(cetHour < 0)  cetHour += 24;
-         if(cetHour >= 24) cetHour -= 24;
-
-         //--- Check London open window
-         if(!g_londonScanned && IsWithinWindow(cetHour, cetMin, InpLondonOpenHour, InpLondonOpenMin))
+         //--- Check Kill Zone start window
+         if(!g_killZoneScanned && IsWithinWindow(mezHour, mezMin, InpKillZoneStart, InpKillZoneStartMin))
          {
             if(IsCooldownElapsed())
             {
-               Print("London open window detected (CET ", cetHour, ":", StringFormat("%02d", cetMin), ")");
+               Print("Kill Zone start detected (MEZ ", mezHour, ":", StringFormat("%02d", mezMin), ")");
                if(RunAnalysis("London"))
-                  g_londonScanned = true;
-            }
-         }
-
-         //--- Check NY open window
-         if(!g_nyScanned && IsWithinWindow(cetHour, cetMin, InpNYOpenHour, InpNYOpenMin))
-         {
-            if(IsCooldownElapsed())
-            {
-               Print("NY open window detected (CET ", cetHour, ":", StringFormat("%02d", cetMin), ")");
-               if(RunAnalysis("NY"))
-                  g_nyScanned = true;
+                  g_killZoneScanned = true;
             }
          }
       }
    }
 
-   //--- ALL MODES: Poll for pending trades every 10 seconds
+   //--- ALL MODES: Poll for watch trades every 10 seconds (zone monitoring)
+   if(TimeCurrent() - g_lastWatchPoll >= 10)
+   {
+      g_lastWatchPoll = TimeCurrent();
+      PollWatchTrade();
+   }
+
+   //--- ALL MODES: Check if price reached the watched entry zone
+   if(g_hasWatch)
+      CheckZoneReached(mezHour);
+
+   //--- ALL MODES: Poll for pending trades (confirmed by Haiku or manual Execute)
    if(TimeCurrent() - g_lastPollTime >= 10)
    {
       g_lastPollTime = TimeCurrent();
       PollPendingTrade();
    }
-
-   //--- ALL MODES: Check if pending limit orders should be cancelled (session end)
-   CheckLimitOrderExpiry();
 
    //--- ALL MODES: Check if tracked positions have closed (TP/SL hit)
    CheckPositionClosures();
@@ -234,36 +232,196 @@ void OnTimer()
 }
 
 //+------------------------------------------------------------------+
-//| Trade transaction handler — detect when limit orders fill           |
+//| Poll server for watch trades (zone to monitor)                     |
 //+------------------------------------------------------------------+
-void OnTradeTransaction(const MqlTradeTransaction &trans,
-                        const MqlTradeRequest &request,
-                        const MqlTradeResult &result)
+void PollWatchTrade()
 {
-   //--- When a pending order fills, it becomes a position → start tracking
-   if(trans.type == TRADE_TRANSACTION_ORDER_DELETE)
+   string url = InpServerBase + "/watch_trade?symbol=" + g_serverSymbol;
+   char   postData[];
+   char   result[];
+   string resultHeaders;
+   string headers = "";
+
+   int res = WebRequest("GET", url, headers, 5000, postData, result, resultHeaders);
+   if(res != 200)
+      return;
+
+   string response = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
+
+   //--- Check if there's an active watch
+   if(StringFind(response, "\"has_watch\": true") < 0 &&
+      StringFind(response, "\"has_watch\":true") < 0)
    {
-      //--- Check if this was one of our limit orders filling
-      if(g_limitTicket1 > 0 && trans.order == g_limitTicket1)
+      if(g_hasWatch)
       {
-         //--- Limit order filled → find the resulting position
-         if(trans.order_state == ORDER_STATE_FILLED)
-         {
-            g_posTicket1 = trans.order;   // position ticket often matches order ticket
-            g_posTradeId = g_limitTradeId;
-            Print("Limit order #", g_limitTicket1, " (TP1) FILLED — now tracking position");
-         }
+         Print("Watch trade cleared by server.");
+         g_hasWatch = false;
       }
-      if(g_limitTicket2 > 0 && trans.order == g_limitTicket2)
-      {
-         if(trans.order_state == ORDER_STATE_FILLED)
-         {
-            g_posTicket2 = trans.order;
-            g_posTradeId = g_limitTradeId;
-            Print("Limit order #", g_limitTicket2, " (TP2) FILLED — now tracking position");
-         }
-      }
+      return;
    }
+
+   //--- Parse watch trade data
+   string tradeId = JsonGetString(response, "id");
+
+   //--- Skip if we already have this watch
+   if(tradeId == g_watchTradeId && g_hasWatch)
+      return;
+
+   g_watchTradeId  = tradeId;
+   g_watchBias     = JsonGetString(response, "bias");
+   g_watchZoneMin  = JsonGetDouble(response, "entry_min");
+   g_watchZoneMax  = JsonGetDouble(response, "entry_max");
+   g_watchSL       = JsonGetDouble(response, "stop_loss");
+   g_watchTP1      = JsonGetDouble(response, "tp1");
+   g_watchTP2      = JsonGetDouble(response, "tp2");
+   g_watchSlPips   = JsonGetDouble(response, "sl_pips");
+   g_watchMaxChecks = (int)JsonGetDouble(response, "max_confirmations");
+   if(g_watchMaxChecks <= 0) g_watchMaxChecks = 3;
+   g_hasWatch      = true;
+   g_lastConfirmTime = 0;
+
+   Print("=== ", _Symbol, " WATCH started: ", g_watchBias, " zone ",
+         DoubleToString(g_watchZoneMin, g_digits), "-", DoubleToString(g_watchZoneMax, g_digits),
+         " (ID: ", g_watchTradeId, ") ===");
+}
+
+//+------------------------------------------------------------------+
+//| Check if price reached the watched entry zone                      |
+//+------------------------------------------------------------------+
+void CheckZoneReached(int mezHour)
+{
+   if(!g_hasWatch) return;
+
+   //--- Cancel watch if Kill Zone ended
+   if(mezHour >= InpKillZoneEnd)
+   {
+      Print("Kill Zone ended (MEZ ", mezHour, ":00) — cancelling watch ", g_watchTradeId);
+      g_hasWatch = false;
+      return;
+   }
+
+   //--- Get current price based on bias
+   double price;
+   if(g_watchBias == "long")
+      price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   else
+      price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   //--- Check if price is within entry zone
+   if(price < g_watchZoneMin || price > g_watchZoneMax)
+      return;
+
+   //--- Respect confirmation cooldown (prevent rapid-fire Haiku calls)
+   if(g_lastConfirmTime > 0 && TimeCurrent() - g_lastConfirmTime < InpConfirmCooldown)
+      return;
+
+   Print("ZONE REACHED! Price ", DoubleToString(price, g_digits),
+         " in zone ", DoubleToString(g_watchZoneMin, g_digits), "-",
+         DoubleToString(g_watchZoneMax, g_digits));
+
+   //--- Capture M1 screenshot for confirmation
+   string fileM1 = CaptureTimeframeScreenshot(PERIOD_M1, "M1_confirm");
+   if(fileM1 == "")
+   {
+      Print("ERROR: Failed to capture M1 screenshot for confirmation");
+      return;
+   }
+
+   //--- Send to /confirm_entry endpoint
+   bool confirmed = SendConfirmation(fileM1, g_watchTradeId, g_watchBias, price);
+   g_lastConfirmTime = TimeCurrent();
+
+   FileDelete(fileM1);
+   CreateManualButton();  // Restore button after temp chart
+
+   if(confirmed)
+   {
+      //--- Server converts watch → pending trade
+      //--- Normal PollPendingTrade() will pick it up next cycle
+      g_hasWatch = false;
+      Print("=== M1 CONFIRMED — trade will execute via pending_trade poll ===");
+   }
+   else
+   {
+      Print("M1 REJECTED — watch continues, will retry on next zone touch");
+      //--- If server says max attempts exhausted, it will clear the watch
+      //--- Next PollWatchTrade() will detect has_watch=false
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Send M1 confirmation request to server                             |
+//+------------------------------------------------------------------+
+bool SendConfirmation(string fileM1, string tradeId, string bias, double currentPrice)
+{
+   string url = InpServerBase + "/confirm_entry";
+   string boundary = "----AIConfirm" + IntegerToString(GetTickCount());
+
+   char postData[];
+
+   //--- Part 1: trade_id
+   AppendStringToBody(postData, "--" + boundary + "\r\n");
+   AppendStringToBody(postData, "Content-Disposition: form-data; name=\"trade_id\"\r\n\r\n");
+   AppendStringToBody(postData, tradeId);
+
+   //--- Part 2: symbol
+   AppendStringToBody(postData, "\r\n--" + boundary + "\r\n");
+   AppendStringToBody(postData, "Content-Disposition: form-data; name=\"symbol\"\r\n\r\n");
+   AppendStringToBody(postData, g_serverSymbol);
+
+   //--- Part 3: bias
+   AppendStringToBody(postData, "\r\n--" + boundary + "\r\n");
+   AppendStringToBody(postData, "Content-Disposition: form-data; name=\"bias\"\r\n\r\n");
+   AppendStringToBody(postData, bias);
+
+   //--- Part 4: current_price
+   AppendStringToBody(postData, "\r\n--" + boundary + "\r\n");
+   AppendStringToBody(postData, "Content-Disposition: form-data; name=\"current_price\"\r\n\r\n");
+   AppendStringToBody(postData, DoubleToString(currentPrice, g_digits));
+
+   //--- Part 5: entry_min
+   AppendStringToBody(postData, "\r\n--" + boundary + "\r\n");
+   AppendStringToBody(postData, "Content-Disposition: form-data; name=\"entry_min\"\r\n\r\n");
+   AppendStringToBody(postData, DoubleToString(g_watchZoneMin, g_digits));
+
+   //--- Part 6: entry_max
+   AppendStringToBody(postData, "\r\n--" + boundary + "\r\n");
+   AppendStringToBody(postData, "Content-Disposition: form-data; name=\"entry_max\"\r\n\r\n");
+   AppendStringToBody(postData, DoubleToString(g_watchZoneMax, g_digits));
+
+   //--- Part 7: M1 screenshot file
+   AppendFilePart(postData, boundary, "screenshot_m1", fileM1);
+
+   //--- Closing boundary
+   AppendStringToBody(postData, "\r\n--" + boundary + "--\r\n");
+
+   string headers = "Content-Type: multipart/form-data; boundary=" + boundary + "\r\n";
+   char   result[];
+   string resultHeaders;
+
+   Print("Sending M1 confirmation to ", url, " (", ArraySize(postData), " bytes)...");
+
+   int res = WebRequest("POST", url, headers, 30000, postData, result, resultHeaders);
+
+   if(res != 200)
+   {
+      Print("ERROR: Confirmation request failed (HTTP ", res, ")");
+      return false;
+   }
+
+   string response = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
+   Print("Confirmation response: ", response);
+
+   //--- Parse confirmed flag
+   if(StringFind(response, "\"confirmed\": true") >= 0 ||
+      StringFind(response, "\"confirmed\":true") >= 0)
+   {
+      Print("M1 confirmation: CONFIRMED!");
+      return true;
+   }
+
+   Print("M1 confirmation: REJECTED");
+   return false;
 }
 
 //+------------------------------------------------------------------+
@@ -1115,72 +1273,7 @@ void PollPendingTrade()
    ExecuteTrade(tradeId, bias, entryMin, entryMax, stopLoss, tp1, tp2, slPips);
 }
 
-//+------------------------------------------------------------------+
-//| Check if pending limit orders should be cancelled (session end)    |
-//+------------------------------------------------------------------+
-void CheckLimitOrderExpiry()
-{
-   //--- Nothing to check if no pending limit orders
-   if(g_limitTicket1 == 0 && g_limitTicket2 == 0)
-      return;
-
-   //--- Get current CET hour
-   MqlDateTime dt;
-   TimeCurrent(dt);
-   int cetHour = dt.hour - InpTimezoneOffset;
-   if(cetHour < 0)  cetHour += 24;
-   if(cetHour >= 24) cetHour -= 24;
-
-   //--- Determine the session end hour
-   int endHour = 0;
-   if(g_limitSession == "London")
-      endHour = InpLondonEndHour;
-   else if(g_limitSession == "NY")
-      endHour = InpNYEndHour;
-   else
-      endHour = InpNYEndHour;  // Manual scans default to NY end
-
-   //--- Check if session has ended
-   if(cetHour < endHour)
-      return;
-
-   //--- First check if orders are still pending (they may have been filled)
-   bool anyDeleted = false;
-
-   if(g_limitTicket1 > 0 && OrderSelect(g_limitTicket1))
-   {
-      //--- Order still exists as pending — cancel it
-      if(g_trade.OrderDelete(g_limitTicket1))
-      {
-         Print("Limit order #", g_limitTicket1, " (TP1) cancelled — ", g_limitSession, " session ended (CET ", cetHour, ":00)");
-         anyDeleted = true;
-      }
-      else
-         Print("WARNING: Failed to cancel limit order #", g_limitTicket1, ": ", g_trade.ResultRetcodeDescription());
-   }
-
-   if(g_limitTicket2 > 0 && OrderSelect(g_limitTicket2))
-   {
-      if(g_trade.OrderDelete(g_limitTicket2))
-      {
-         Print("Limit order #", g_limitTicket2, " (TP2) cancelled — ", g_limitSession, " session ended (CET ", cetHour, ":00)");
-         anyDeleted = true;
-      }
-      else
-         Print("WARNING: Failed to cancel limit order #", g_limitTicket2, ": ", g_trade.ResultRetcodeDescription());
-   }
-
-   if(anyDeleted)
-      Print("=== ", _Symbol, " unfilled limit orders cancelled (", g_limitSession, " session end, trade ", g_limitTradeId, ") ===");
-   else if(g_limitTicket1 > 0 || g_limitTicket2 > 0)
-      Print(_Symbol, " limit orders for trade ", g_limitTradeId, " were already filled or cancelled.");
-
-   //--- Clear tracking
-   g_limitTicket1 = 0;
-   g_limitTicket2 = 0;
-   g_limitSession = "";
-   g_limitTradeId = "";
-}
+// CheckLimitOrderExpiry removed in v6.0 — replaced by zone watching + M1 confirmation
 
 //+------------------------------------------------------------------+
 //| Execute trade with split lots (50% TP1, 50% TP2)                   |
@@ -1190,8 +1283,9 @@ void CheckLimitOrderExpiry()
 void ExecuteTrade(string tradeId, string bias, double entryMin, double entryMax,
                   double stopLoss, double tp1, double tp2, double slPips)
 {
+   //--- v6.0: Market orders ONLY (M1 confirmation already verified price is at zone)
    Print("Executing ", _Symbol, " trade: ", bias, " ID=", tradeId,
-         " entry_zone=", DoubleToString(entryMin, g_digits), "-", DoubleToString(entryMax, g_digits));
+         " (M1 confirmed at zone)");
 
    //--- Mark this trade as processed
    g_lastTradeId = tradeId;
@@ -1222,204 +1316,80 @@ void ExecuteTrade(string tradeId, string bias, double entryMin, double entryMax,
          " TP1=", DoubleToString(lotsTP1, 2),
          " TP2=", DoubleToString(lotsTP2, 2));
 
-   //--- Determine current price
+   //--- Place MARKET orders (price is in the zone, M1 confirmed reaction)
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double entryMid = NormalizeDouble((entryMin + entryMax) / 2.0, g_digits);
-
-   //--- Decide: market order or limit order
-   bool useLimit = false;
+   ENUM_ORDER_TYPE orderType;
+   double price;
 
    if(bias == "long")
    {
-      //--- LONG: want to buy when price drops INTO the entry zone
-      //--- If ask is above entry zone → place BUY LIMIT at entry_min (wait for pullback)
-      //--- If ask is in or below zone → market buy now
-      if(ask > entryMax)
-      {
-         useLimit = true;
-         Print("Price ", DoubleToString(ask, g_digits), " is ABOVE entry zone — placing BUY LIMIT at ", DoubleToString(entryMin, g_digits));
-      }
-      else
-      {
-         Print("Price ", DoubleToString(ask, g_digits), " is in/below entry zone — executing MARKET BUY");
-      }
+      orderType = ORDER_TYPE_BUY;
+      price = ask;
    }
-   else // short
+   else
    {
-      //--- SHORT: want to sell when price rises INTO the entry zone
-      //--- If bid is below entry zone → place SELL LIMIT at entry_max (wait for retracement)
-      //--- If bid is in or above zone → market sell now
-      if(bid < entryMin)
-      {
-         useLimit = true;
-         Print("Price ", DoubleToString(bid, g_digits), " is BELOW entry zone — placing SELL LIMIT at ", DoubleToString(entryMax, g_digits));
-      }
-      else
-      {
-         Print("Price ", DoubleToString(bid, g_digits), " is in/above entry zone — executing MARKET SELL");
-      }
+      orderType = ORDER_TYPE_SELL;
+      price = bid;
    }
 
    bool ok1, ok2;
    ulong ticket1 = 0, ticket2 = 0;
    double actualEntry = 0;
 
-   if(useLimit)
+   //--- Position 1: TP1 (close 50%)
+   string comment1 = "AI_" + tradeId + "_TP1";
+   ok1 = g_trade.PositionOpen(_Symbol, orderType, lotsTP1, price, stopLoss, tp1, comment1);
+   ticket1 = ok1 ? g_trade.ResultOrder() : 0;
+   actualEntry = ok1 ? g_trade.ResultPrice() : 0;
+
+   if(!ok1)
    {
-      //--- Place LIMIT orders (pending — will fill when price reaches entry zone)
-      double limitPrice;
-      ENUM_ORDER_TYPE limitType;
-
-      if(bias == "long")
-      {
-         limitType = ORDER_TYPE_BUY_LIMIT;
-         limitPrice = entryMin;  // Buy at bottom of entry zone
-      }
-      else
-      {
-         limitType = ORDER_TYPE_SELL_LIMIT;
-         limitPrice = entryMax;  // Sell at top of entry zone
-      }
-
-      limitPrice = NormalizeDouble(limitPrice, g_digits);
-
-      //--- Order 1: TP1 (close 50%)
-      string comment1 = "AI_" + tradeId + "_TP1";
-      ok1 = g_trade.OrderOpen(_Symbol, limitType, lotsTP1, 0, limitPrice, stopLoss, tp1,
-                               ORDER_TIME_GTC, 0, comment1);
-      ticket1 = ok1 ? g_trade.ResultOrder() : 0;
-
-      if(!ok1)
-      {
-         Print("ERROR: TP1 limit order failed: ", g_trade.ResultRetcodeDescription());
-         SendExecutionReport(tradeId, 0, 0, 0, 0, 0, 0, 0, 0, "failed",
-                             "TP1 limit failed: " + g_trade.ResultRetcodeDescription());
-         return;
-      }
-      Print("TP1 LIMIT order placed: ticket=", ticket1, " at ", DoubleToString(limitPrice, g_digits));
-
-      //--- Order 2: TP2 (runner 50%)
-      string comment2 = "AI_" + tradeId + "_TP2";
-      ok2 = g_trade.OrderOpen(_Symbol, limitType, lotsTP2, 0, limitPrice, stopLoss, tp2,
-                               ORDER_TIME_GTC, 0, comment2);
-      ticket2 = ok2 ? g_trade.ResultOrder() : 0;
-
-      if(!ok2)
-      {
-         Print("WARNING: TP2 limit order failed: ", g_trade.ResultRetcodeDescription());
-         SendExecutionReport(tradeId, (int)ticket1, 0, lotsTP1, 0,
-                             limitPrice, stopLoss, tp1, 0, "executed",
-                             "TP2 limit failed: " + g_trade.ResultRetcodeDescription());
-         return;
-      }
-      Print("TP2 LIMIT order placed: ticket=", ticket2, " at ", DoubleToString(limitPrice, g_digits));
-
-      Print("=== ", _Symbol, " LIMIT orders placed: ", bias, " ", DoubleToString(lotsTP1 + lotsTP2, 2),
-            " lots at ", DoubleToString(limitPrice, g_digits), " ===");
-
-      //--- Store limit order tickets for session-based expiry
-      g_limitTicket1 = ticket1;
-      g_limitTicket2 = ticket2;
-      g_limitTradeId = tradeId;
-
-      //--- Store trade levels for break-even and trailing stop management
-      g_tradeEntry = limitPrice;
-      g_tradeSL    = stopLoss;
-      g_tradeTP1   = tp1;
-      g_tradeTP2   = tp2;
-      g_tradeBias  = bias;
-      g_tp1Hit     = false;
-
-      //--- Determine current session from CET hour
-      MqlDateTime dtNow;
-      TimeCurrent(dtNow);
-      int cetNow = dtNow.hour - InpTimezoneOffset;
-      if(cetNow < 0)  cetNow += 24;
-      if(cetNow >= 24) cetNow -= 24;
-
-      if(cetNow < InpLondonEndHour)
-         g_limitSession = "London";
-      else
-         g_limitSession = "NY";
-
-      Print("Limit orders tracked for ", g_limitSession, " session expiry (end at CET ",
-            (g_limitSession == "London" ? IntegerToString(InpLondonEndHour) : IntegerToString(InpNYEndHour)), ":00)");
-
-      SendExecutionReport(tradeId, (int)ticket1, (int)ticket2, lotsTP1, lotsTP2,
-                          limitPrice, stopLoss, tp1, tp2, "pending", "");
+      Print("ERROR: TP1 market order failed: ", g_trade.ResultRetcodeDescription());
+      SendExecutionReport(tradeId, 0, 0, 0, 0, 0, 0, 0, 0, "failed",
+                          "TP1 market failed: " + g_trade.ResultRetcodeDescription());
+      return;
    }
+   Print("TP1 MARKET order filled: ticket=", ticket1, " entry=", DoubleToString(actualEntry, g_digits));
+
+   //--- Position 2: TP2 (runner 50%)
+   if(bias == "long")
+      price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    else
+      price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   string comment2 = "AI_" + tradeId + "_TP2";
+   ok2 = g_trade.PositionOpen(_Symbol, orderType, lotsTP2, price, stopLoss, tp2, comment2);
+   ticket2 = ok2 ? g_trade.ResultOrder() : 0;
+   double actualEntry2 = ok2 ? g_trade.ResultPrice() : 0;
+
+   if(!ok2)
    {
-      //--- Place MARKET orders (price is already in the entry zone)
-      ENUM_ORDER_TYPE orderType;
-      double price;
-
-      if(bias == "long")
-      {
-         orderType = ORDER_TYPE_BUY;
-         price = ask;
-      }
-      else
-      {
-         orderType = ORDER_TYPE_SELL;
-         price = bid;
-      }
-
-      //--- Position 1: TP1 (close 50%)
-      string comment1 = "AI_" + tradeId + "_TP1";
-      ok1 = g_trade.PositionOpen(_Symbol, orderType, lotsTP1, price, stopLoss, tp1, comment1);
-      ticket1 = ok1 ? g_trade.ResultOrder() : 0;
-      actualEntry = ok1 ? g_trade.ResultPrice() : 0;
-
-      if(!ok1)
-      {
-         Print("ERROR: TP1 market order failed: ", g_trade.ResultRetcodeDescription());
-         SendExecutionReport(tradeId, 0, 0, 0, 0, 0, 0, 0, 0, "failed",
-                             "TP1 market failed: " + g_trade.ResultRetcodeDescription());
-         return;
-      }
-      Print("TP1 MARKET order filled: ticket=", ticket1, " entry=", DoubleToString(actualEntry, g_digits));
-
-      //--- Position 2: TP2 (runner 50%)
-      if(bias == "long")
-         price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      else
-         price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-
-      string comment2 = "AI_" + tradeId + "_TP2";
-      ok2 = g_trade.PositionOpen(_Symbol, orderType, lotsTP2, price, stopLoss, tp2, comment2);
-      ticket2 = ok2 ? g_trade.ResultOrder() : 0;
-      double actualEntry2 = ok2 ? g_trade.ResultPrice() : 0;
-
-      if(!ok2)
-      {
-         Print("WARNING: TP2 market order failed: ", g_trade.ResultRetcodeDescription());
-         SendExecutionReport(tradeId, (int)ticket1, 0, lotsTP1, 0,
-                             actualEntry, stopLoss, tp1, 0, "executed",
-                             "TP2 market failed: " + g_trade.ResultRetcodeDescription());
-         return;
-      }
-      Print("TP2 MARKET order filled: ticket=", ticket2, " entry=", DoubleToString(actualEntry2, g_digits));
-
-      Print("=== ", _Symbol, " MARKET orders filled: ", bias, " ", DoubleToString(lotsTP1 + lotsTP2, 2), " lots ===");
-
-      //--- Track positions for close detection
-      g_posTicket1 = ticket1;
-      g_posTicket2 = ticket2;
-      g_posTradeId = tradeId;
-
-      //--- Store trade levels for break-even and trailing stop management
-      g_tradeEntry = actualEntry;
-      g_tradeSL    = stopLoss;
-      g_tradeTP1   = tp1;
-      g_tradeTP2   = tp2;
-      g_tradeBias  = bias;
-      g_tp1Hit     = false;
-
-      SendExecutionReport(tradeId, (int)ticket1, (int)ticket2, lotsTP1, lotsTP2,
-                          actualEntry, stopLoss, tp1, tp2, "executed", "");
+      Print("WARNING: TP2 market order failed: ", g_trade.ResultRetcodeDescription());
+      SendExecutionReport(tradeId, (int)ticket1, 0, lotsTP1, 0,
+                          actualEntry, stopLoss, tp1, 0, "executed",
+                          "TP2 market failed: " + g_trade.ResultRetcodeDescription());
+      return;
    }
+   Print("TP2 MARKET order filled: ticket=", ticket2, " entry=", DoubleToString(actualEntry2, g_digits));
+
+   Print("=== ", _Symbol, " MARKET orders filled: ", bias, " ", DoubleToString(lotsTP1 + lotsTP2, 2), " lots ===");
+
+   //--- Track positions for close detection
+   g_posTicket1 = ticket1;
+   g_posTicket2 = ticket2;
+   g_posTradeId = tradeId;
+
+   //--- Store trade levels for break-even and trailing stop management
+   g_tradeEntry = actualEntry;
+   g_tradeSL    = stopLoss;
+   g_tradeTP1   = tp1;
+   g_tradeTP2   = tp2;
+   g_tradeBias  = bias;
+   g_tp1Hit     = false;
+
+   SendExecutionReport(tradeId, (int)ticket1, (int)ticket2, lotsTP1, lotsTP2,
+                       actualEntry, stopLoss, tp1, tp2, "executed", "");
 }
 
 //+------------------------------------------------------------------+

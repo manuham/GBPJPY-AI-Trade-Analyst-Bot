@@ -6,10 +6,12 @@ PAIR_PROFILES: dict[str, dict] = {
     "GBPJPY": {
         "digits": 3,
         "typical_spread": "2-3 pips",
-        "key_sessions": "London & Tokyo overlap",
+        "key_sessions": "London Kill Zone (08:00-11:00 MEZ)",
         "base_currency": "GBP",
         "quote_currency": "JPY",
-        "specialization": "JPY crosses",
+        "specialization": "GBPJPY London Kill Zone — Asian range sweep patterns",
+        "kill_zone_start_mez": 8,
+        "kill_zone_end_mez": 11,
         "search_queries": [
             "GBPJPY forecast today",
             "GBP news today",

@@ -1,4 +1,4 @@
-# v2.0 — H4 timeframe + ICT criteria
+# v3.0 — Smart entry confirmation + London Kill Zone
 from __future__ import annotations
 
 from typing import Optional
@@ -109,6 +109,26 @@ class PendingTrade(BaseModel):
     sl_pips: float
     confidence: str
     queued_at: float = 0.0  # Unix timestamp — for multi-consumer expiry (60s window)
+
+
+class WatchTrade(BaseModel):
+    """A setup being watched — EA monitors price, confirms via Haiku before entry."""
+    id: str                          # UUID hex[:8]
+    symbol: str = ""
+    bias: str                        # "long" or "short"
+    entry_min: float                 # Bottom of entry zone
+    entry_max: float                 # Top of entry zone
+    stop_loss: float
+    tp1: float
+    tp2: float
+    sl_pips: float
+    confidence: str
+    confluence: list[str] = []       # Passed to Haiku for context
+    checklist_score: str = ""
+    created_at: float = 0.0          # Unix timestamp when watch started
+    max_confirmations: int = 3       # Max Haiku checks before giving up
+    confirmations_used: int = 0      # How many times Haiku was called
+    status: str = "watching"         # "watching" | "confirmed" | "rejected" | "expired"
 
 
 class TradeExecutionReport(BaseModel):

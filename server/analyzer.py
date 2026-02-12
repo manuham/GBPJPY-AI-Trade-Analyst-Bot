@@ -1,4 +1,4 @@
-# v2.0 — H4 timeframe + ICT criteria
+# v3.0 — Smart entry confirmation + London Kill Zone
 from __future__ import annotations
 
 import base64
@@ -64,16 +64,17 @@ The following fundamental analysis was gathered earlier today. Use it as context
         fundamentals_section = f"""### Step 0 — Fundamentals (web search)
 Use web search to check current {base} and {quote} drivers, breaking news, and the economic calendar for the next 24 hours. Search for {search_queries}."""
 
-    return f"""You are a senior institutional FX analyst specializing in {profile['specialization']} using ICT (Inner Circle Trader) methodology. You are analyzing live {symbol} charts from MetaTrader 5.
+    return f"""You are a senior institutional FX analyst specializing in {symbol} during the London Kill Zone using ICT (Inner Circle Trader) methodology. You are analyzing live {symbol} charts from MetaTrader 5.
 
 ## CONTEXT
 - Pair: {symbol}
-- Active sessions: {profile['key_sessions']}
+- Session: **London Kill Zone (08:00-11:00 MEZ)** — the highest-probability window for {symbol}
 - Risk per trade: 1%
 - TP strategy: 50% closed at TP1, runner to TP2
 - Charts provided: **D1 (Daily)**, **H4 (4-Hour)**, **H1 (Hourly)**, **M5 (5-Minute)** — top-down
 - The charts include horizontal swing-level lines drawn by a custom indicator
 - Market data JSON includes: previous day H/L/C, weekly H/L, Asian session range, RSI(14), ATR(14) for all timeframes
+- **IMPORTANT**: Setups from this analysis will NOT be executed immediately. The EA will WATCH the entry zone and only enter when price reaches it AND an M1 confirmation shows a reaction. So propose setups even if price is not yet at the entry zone — the system will wait.
 
 ## YOUR TASK
 
@@ -115,6 +116,17 @@ Use the provided market data to identify key levels:
 - **Asian Session Range** (asian_high/asian_low) — London often sweeps one side of the Asian range before reversing
 - **Weekly High/Low** — key swing liquidity targets
 - Mark which of these levels price is currently near or has recently swept
+
+### Step 3b — London Kill Zone Context
+You are analyzing during the London Kill Zone (08:00-11:00 MEZ), the most active period for {symbol}:
+- **Asian Range Sweep**: London typically opens by sweeping one side of the Asian session range (00:00-08:00 MEZ):
+  - Asian HIGH swept → institutional selling above, bias shifts BEARISH (expect reversal down)
+  - Asian LOW swept → institutional buying below, bias shifts BULLISH (expect reversal up)
+  - Neither swept yet → the sweep is coming, identify which side is more vulnerable
+- **PDH/PDL** are the PRIMARY liquidity targets during this window
+- Most institutional {symbol} moves happen in the first 90 minutes (08:00-09:30 MEZ)
+- After 09:30, moves tend to consolidate — prefer entries before 09:30 if possible
+- Check if the Asian range was tight (<30 pips) or wide (>60 pips) — tight ranges often lead to explosive London moves
 
 ### Step 4 — Multi-Timeframe Alignment (D1 → H4 → H1 → M5)
 - Market structure per timeframe: BOS, ChoCH locations with exact prices
@@ -274,7 +286,8 @@ Respond with ONLY valid JSON matching this structure:
 - Consider {symbol} spread (~{profile['typical_spread']}) in SL/TP calculations
 - Use RSI as confirmation, not as a standalone signal
 - Flag any setups near high-impact news events
-- IMPORTANT: Actively look for setups. Most London and NY sessions offer at least one tradeable opportunity on {symbol}. A low-confidence setup with clear risk management is still useful — the trader decides whether to execute.
+- IMPORTANT: Actively look for setups. The London Kill Zone (08:00-11:00 MEZ) almost always offers at least one high-probability {symbol} setup, especially around the Asian range sweep. A medium-confidence setup with clear risk management is still valuable — the system will wait for M1 confirmation before entering.
+- Prefer setups where entry is near current price or approaching (entry_status "at_zone" or "approaching") — these are more likely to trigger during the kill zone window.
 - Always respond with valid JSON, nothing else"""
 
 
@@ -882,3 +895,112 @@ async def analyze_charts(
         screenshot_d1, screenshot_h4, screenshot_h1, screenshot_m5,
         market_data, profile, fundamentals,
     )
+
+
+# ---------------------------------------------------------------------------
+# Haiku M1 entry confirmation (cheap, called when price reaches zone)
+# ---------------------------------------------------------------------------
+async def confirm_entry(
+    screenshot_m1: bytes,
+    symbol: str,
+    bias: str,
+    current_price: float,
+    entry_min: float,
+    entry_max: float,
+    confluence: list[str] | None = None,
+) -> dict:
+    """Quick Haiku check: is price showing a reaction at the entry zone?
+
+    Called by the EA when price reaches the entry zone.
+    Cost: ~$0.03-0.08 per call (1 small image + minimal text).
+    Returns: {"confirmed": bool, "reasoning": "1 sentence"}
+    """
+    if not ANTHROPIC_API_KEY:
+        return {"confirmed": True, "reasoning": "API key missing, auto-confirming"}
+
+    client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+    profile = get_profile(symbol)
+    digits = profile["digits"]
+
+    direction = "bullish" if bias == "long" else "bearish"
+    opposite = "bearish" if bias == "long" else "bullish"
+
+    confluence_text = ""
+    if confluence:
+        confluence_text = f"\nOriginal confluence: {', '.join(confluence[:3])}"
+
+    system_prompt = f"""You are a fast M1 price-action reader for {symbol}. Your ONLY job is to check if there is a {direction} reaction forming on the M1 chart right now.
+
+Look at the LAST 10-15 M1 candles and answer YES or NO.
+
+Signs of a {direction} reaction (need at least 1):
+- Rejection wick(s) off {'support' if bias == 'long' else 'resistance'} (long wick, small body)
+- {'Bullish' if bias == 'long' else 'Bearish'} engulfing candle
+- M1 Break of Structure (BOS) {'upward' if bias == 'long' else 'downward'}
+- {'Bullish' if bias == 'long' else 'Bearish'} FVG forming
+- Strong {'buying' if bias == 'long' else 'selling'} pressure (consecutive {direction} candles with increasing body size)
+
+Signs to REJECT (say NO):
+- Price slicing through the zone without pausing ({opposite} momentum)
+- No visible reaction — candles just passing through
+- {'Bearish' if bias == 'long' else 'Bullish'} engulfing at the zone (wrong direction)
+- Wicks on the wrong side (no rejection)
+
+Respond with ONLY this JSON:
+{{"confirmed": true or false, "reasoning": "1 sentence explaining what you see on M1"}}"""
+
+    user_content = [
+        {"type": "text", "text": f"--- M1 (1-Minute) Chart ---"},
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": _encode_image(screenshot_m1),
+            },
+        },
+        {
+            "type": "text",
+            "text": (
+                f"Setup: {bias.upper()} {symbol}\n"
+                f"Entry zone: {entry_min:.{digits}f} - {entry_max:.{digits}f}\n"
+                f"Current price: {current_price:.{digits}f}\n"
+                f"Looking for: {direction} reaction at this zone"
+                f"{confluence_text}\n\n"
+                f"Is there a {direction} reaction on M1? JSON only."
+            ),
+        },
+    ]
+
+    try:
+        logger.info("[%s] Haiku M1 confirmation check (%s at %.{0}f)...".replace("{0}", str(digits)),
+                     symbol, bias.upper(), current_price)
+        response = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_content}],
+        )
+
+        raw_text = ""
+        for block in response.content:
+            if hasattr(block, "text") and block.text is not None:
+                raw_text += block.text
+
+        usage = response.usage
+        logger.info("[%s] Haiku confirmation: input=%d, output=%d",
+                     symbol, usage.input_tokens, usage.output_tokens)
+
+        parsed = _parse_response(raw_text)
+        if parsed:
+            confirmed = parsed.get("confirmed", False)
+            reasoning = parsed.get("reasoning", "")
+            logger.info("[%s] Haiku verdict: confirmed=%s — %s", symbol, confirmed, reasoning)
+            return {"confirmed": confirmed, "reasoning": reasoning}
+
+        logger.warning("[%s] Haiku confirmation parse failed, defaulting to NO", symbol)
+        return {"confirmed": False, "reasoning": "Parse failed — skipping for safety"}
+
+    except Exception as e:
+        logger.error("[%s] Haiku confirmation error: %s — defaulting to NO", symbol, e)
+        return {"confirmed": False, "reasoning": f"Error: {e}"}

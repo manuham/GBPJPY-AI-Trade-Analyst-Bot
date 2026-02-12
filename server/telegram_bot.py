@@ -1,4 +1,4 @@
-# v2.0 — H4 timeframe + ICT criteria
+# v3.0 — Smart entry confirmation + London Kill Zone
 from __future__ import annotations
 
 import logging
@@ -15,7 +15,7 @@ from telegram.ext import (
 )
 
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, MAX_DAILY_DRAWDOWN_PCT, MAX_OPEN_TRADES
-from models import AnalysisResult, PendingTrade, TradeExecutionReport, TradeSetup
+from models import AnalysisResult, PendingTrade, WatchTrade, TradeExecutionReport, TradeSetup
 from news_filter import check_news_restriction, get_upcoming_news
 from pair_profiles import get_profile
 from trade_tracker import (
@@ -53,6 +53,46 @@ def store_analysis(result: AnalysisResult):
 def _fmt(price: float, digits: int) -> str:
     """Format a price with the correct number of decimal places."""
     return f"{price:.{digits}f}"
+
+
+async def check_risk_filters(symbol: str, setup: TradeSetup) -> tuple[bool, str]:
+    """Check all risk filters for a trade setup.
+    Returns (passed: bool, block_reason: str). Reused by Execute button AND auto-queue."""
+    # --- FTMO News Filter ---
+    news_check = await check_news_restriction(symbol)
+    if news_check.blocked:
+        return False, f"News: {news_check.event_title}"
+
+    # --- Daily Drawdown Check ---
+    try:
+        daily = get_daily_pnl()
+        daily_pnl = daily["daily_pnl"]
+        from main import _last_market_data
+        md = _last_market_data.get(symbol)
+        if md and md.account_balance > 0:
+            drawdown_pct = abs(min(0, daily_pnl)) / md.account_balance * 100
+            if drawdown_pct >= MAX_DAILY_DRAWDOWN_PCT:
+                return False, f"Drawdown: {drawdown_pct:.1f}%"
+    except Exception:
+        pass
+
+    # --- Max Open Trades ---
+    try:
+        open_trades = get_open_trades()
+        if len(open_trades) >= MAX_OPEN_TRADES:
+            return False, f"Max trades: {len(open_trades)}/{MAX_OPEN_TRADES}"
+    except Exception:
+        pass
+
+    # --- Correlation Filter ---
+    try:
+        corr_warning = check_correlation_conflict(symbol, setup.bias)
+        if corr_warning:
+            return False, f"Correlation: {corr_warning}"
+    except Exception:
+        pass
+
+    return True, ""
 
 
 def _format_setup_message(setup: TradeSetup, summary: str, symbol: str, digits: int) -> str:
@@ -134,8 +174,8 @@ def _format_setup_message(setup: TradeSetup, summary: str, symbol: str, digits: 
     return "\n".join(lines)
 
 
-async def send_analysis(result: AnalysisResult):
-    """Send analysis results to Telegram."""
+async def send_analysis(result: AnalysisResult, auto_queued_indices: set[int] | None = None):
+    """Send analysis results to Telegram. auto_queued_indices = setups already watching."""
     if not _app:
         logger.error("Telegram bot not initialized")
         return
@@ -178,30 +218,41 @@ async def send_analysis(result: AnalysisResult):
     # Check for upcoming news to add warning to setup messages
     news_check = await check_news_restriction(symbol)
 
+    if auto_queued_indices is None:
+        auto_queued_indices = set()
+
     for i, setup in enumerate(result.setups):
         msg = _format_setup_message(setup, result.market_summary, symbol, digits)
 
-        if news_check.blocked:
+        if i in auto_queued_indices:
+            # This setup was auto-queued as a watch trade
             msg += (
-                f"\n\n\U0001f6ab FTMO NEWS BLOCK ACTIVE\n"
-                f"\U0001f4f0 {news_check.event_currency}: {news_check.event_title}\n"
-                f"Execute button will be blocked until restriction passes."
+                f"\n\n\U0001f50d AUTO-WATCHING\n"
+                f"EA will monitor entry zone and confirm on M1 before entering."
             )
-        elif news_check.warning:
-            msg += f"\n\n\u26a0\ufe0f {news_check.message}"
+            keyboard = None  # No Execute/Skip buttons
+        else:
+            if news_check.blocked:
+                msg += (
+                    f"\n\n\U0001f6ab FTMO NEWS BLOCK ACTIVE\n"
+                    f"\U0001f4f0 {news_check.event_currency}: {news_check.event_title}\n"
+                    f"Execute button will be blocked until restriction passes."
+                )
+            elif news_check.warning:
+                msg += f"\n\n\u26a0\ufe0f {news_check.message}"
 
-        keyboard = InlineKeyboardMarkup(
-            [
+            keyboard = InlineKeyboardMarkup(
                 [
-                    InlineKeyboardButton(
-                        "\u2705 Execute", callback_data=f"execute_{symbol}_{i}"
-                    ),
-                    InlineKeyboardButton(
-                        "\u274c Skip", callback_data=f"skip_{symbol}_{i}"
-                    ),
+                    [
+                        InlineKeyboardButton(
+                            "\u2705 Execute", callback_data=f"execute_{symbol}_{i}"
+                        ),
+                        InlineKeyboardButton(
+                            "\u274c Skip", callback_data=f"skip_{symbol}_{i}"
+                        ),
+                    ]
                 ]
-            ]
-        )
+            )
 
         try:
             await _app.bot.send_message(
@@ -245,77 +296,17 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             setup = analysis.setups[idx]
             digits = analysis.digits or 3
 
-            # --- FTMO News Filter: block execution near high-impact news ---
-            news_check = await check_news_restriction(symbol)
-            if news_check.blocked:
+            # --- Run all risk filters ---
+            passed, block_reason = await check_risk_filters(symbol, setup)
+            if not passed:
                 await query.message.reply_text(
-                    f"\U0001f6ab {symbol} TRADE BLOCKED \u2014 FTMO News Restriction\n"
+                    f"\U0001f6ab {symbol} TRADE BLOCKED\n"
                     f"\u2501" * 20 + "\n"
-                    f"\U0001f4f0 {news_check.event_currency}: {news_check.event_title}\n"
-                    f"\u23f0 {news_check.message}\n\n"
-                    f"Wait until the restriction window passes, then re-send /scan {symbol} "
-                    f"and try again."
+                    f"\u26a0\ufe0f {block_reason}\n\n"
+                    f"Wait for the condition to clear, then try again."
                 )
-                logger.info("[%s] Trade BLOCKED by news filter: %s", symbol, news_check.event_title)
+                logger.info("[%s] Trade BLOCKED: %s", symbol, block_reason)
                 return
-
-            # --- Daily Drawdown Check (FTMO protection) ---
-            try:
-                daily = get_daily_pnl()
-                daily_pnl = daily["daily_pnl"]
-                # We need account balance — use from latest market data if available
-                from main import _last_market_data
-                md = _last_market_data.get(symbol)
-                if md and md.account_balance > 0:
-                    drawdown_pct = abs(min(0, daily_pnl)) / md.account_balance * 100
-                    if drawdown_pct >= MAX_DAILY_DRAWDOWN_PCT:
-                        await query.message.reply_text(
-                            f"\U0001f6ab {symbol} TRADE BLOCKED \u2014 Daily Drawdown Limit\n"
-                            f"\u2501" * 20 + "\n"
-                            f"\U0001f4b0 Daily P&L: ${daily_pnl:+.2f} ({drawdown_pct:.1f}% drawdown)\n"
-                            f"\U0001f6d1 Limit: {MAX_DAILY_DRAWDOWN_PCT}% of balance (${md.account_balance:,.0f})\n\n"
-                            f"No more trades today. Protect your account."
-                        )
-                        logger.info("[%s] Trade BLOCKED by daily drawdown: $%.2f (%.1f%%)",
-                                    symbol, daily_pnl, drawdown_pct)
-                        return
-            except Exception as e:
-                logger.error("Drawdown check failed: %s", e)
-
-            # --- Max Open Trades Check ---
-            try:
-                open_trades = get_open_trades()
-                if len(open_trades) >= MAX_OPEN_TRADES:
-                    open_symbols = ", ".join(t["symbol"] for t in open_trades)
-                    await query.message.reply_text(
-                        f"\U0001f6ab {symbol} TRADE BLOCKED \u2014 Max Open Trades\n"
-                        f"\u2501" * 20 + "\n"
-                        f"\U0001f4ca Open trades: {len(open_trades)}/{MAX_OPEN_TRADES}\n"
-                        f"\U0001f4b1 Currently open: {open_symbols}\n\n"
-                        f"Close an existing position first."
-                    )
-                    logger.info("[%s] Trade BLOCKED by max open trades: %d/%d",
-                                symbol, len(open_trades), MAX_OPEN_TRADES)
-                    return
-            except Exception as e:
-                logger.error("Open trades check failed: %s", e)
-
-            # --- Correlation Filter ---
-            try:
-                corr_warning = check_correlation_conflict(symbol, setup.bias)
-                if corr_warning:
-                    await query.message.reply_text(
-                        f"\U0001f6ab {symbol} TRADE BLOCKED \u2014 Correlation Risk\n"
-                        f"\u2501" * 20 + "\n"
-                        f"\u26a0\ufe0f {corr_warning}\n\n"
-                        f"Taking the same directional exposure on a currency "
-                        f"doubles your risk. Close the existing position first."
-                    )
-                    logger.info("[%s] Trade BLOCKED by correlation filter: %s",
-                                symbol, corr_warning)
-                    return
-            except Exception as e:
-                logger.error("Correlation check failed: %s", e)
 
             trade_id = uuid.uuid4().hex[:8]
             pending = PendingTrade(
@@ -459,9 +450,9 @@ async def _cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines += [
         "",
-        "Scheduled scans (per pair):",
-        "\u2022 London Open: 08:00 CET",
-        "\u2022 NY Open: 14:30 CET",
+        "Session:",
+        "\u2022 London Kill Zone: 08:00-11:00 MEZ",
+        "\u2022 GBPJPY only — smart entry with M1 confirmation",
     ]
 
     await update.message.reply_text("\n".join(lines))
@@ -676,13 +667,14 @@ async def _cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/reset - Force-close stale trades in DB\n"
         "/status - Show bot status for all pairs\n"
         "/help - Show this help message\n\n"
-        "The bot analyzes charts sent from MT5 at:\n"
-        "\u2022 London Open (08:00 CET)\n"
-        "\u2022 NY Open (14:30 CET)\n\n"
-        "Trade setups include Execute/Skip buttons.\n"
+        "The bot analyzes GBPJPY during the London Kill Zone:\n"
+        "\u2022 Analysis: 08:00 MEZ (London open)\n"
+        "\u2022 Watching: 08:00-11:00 MEZ (kill zone)\n"
+        "\u2022 Entry: M1 confirmation when price reaches zone\n\n"
+        "High-confidence setups auto-watch (no manual approval).\n"
+        "Lower confidence setups still show Execute/Skip buttons.\n"
         "Risk management: FTMO news filter, daily drawdown limit,\n"
-        "correlation filter, max open trades cap.\n"
-        "Supports multiple pairs \u2014 attach the EA to each chart."
+        "correlation filter, max open trades cap."
     )
     await update.message.reply_text(msg)
 
@@ -780,6 +772,123 @@ async def send_trade_close_notification(report):
         await _app.bot.send_message(chat_id=chat_id, text=msg)
     except Exception as e:
         logger.error("Failed to send close notification: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Watch trade notifications (smart entry flow)
+# ---------------------------------------------------------------------------
+async def send_watch_started(watch: WatchTrade):
+    """Notify that a setup is being auto-watched."""
+    if not _app:
+        return
+    chat_id = TELEGRAM_CHAT_ID
+    if not chat_id:
+        return
+
+    profile = get_profile(watch.symbol)
+    digits = profile["digits"]
+    direction = "LONG" if watch.bias == "long" else "SHORT"
+
+    msg = (
+        f"\U0001f50d {watch.symbol} {direction} \u2014 Auto-Watching\n"
+        f"\u2501" * 20 + "\n"
+        f"\U0001f194 Watch ID: {watch.id}\n"
+        f"\U0001f4cd Zone: {watch.entry_min:.{digits}f} - {watch.entry_max:.{digits}f}\n"
+        f"\U0001f525 Checklist: {watch.checklist_score} | Confidence: {watch.confidence.upper()}\n\n"
+        f"EA is monitoring price. When zone is reached,\n"
+        f"M1 will be checked for {watch.bias} reaction before entry.\n"
+        f"Max {watch.max_confirmations} confirmation attempts."
+    )
+
+    try:
+        await _app.bot.send_message(chat_id=chat_id, text=msg)
+    except Exception as e:
+        logger.error("Failed to send watch started: %s", e)
+
+
+async def send_zone_reached(watch: WatchTrade, attempt: int):
+    """Notify that price has reached the entry zone."""
+    if not _app:
+        return
+    chat_id = TELEGRAM_CHAT_ID
+    if not chat_id:
+        return
+
+    direction = "LONG" if watch.bias == "long" else "SHORT"
+    reaction = "bullish" if watch.bias == "long" else "bearish"
+
+    msg = (
+        f"\U0001f4cd {watch.symbol} {direction} \u2014 Zone Reached!\n"
+        f"\u2501" * 20 + "\n"
+        f"\U0001f194 Watch: {watch.id}\n"
+        f"Checking M1 for {reaction} reaction... (attempt {attempt}/{watch.max_confirmations})"
+    )
+
+    try:
+        await _app.bot.send_message(chat_id=chat_id, text=msg)
+    except Exception as e:
+        logger.error("Failed to send zone reached: %s", e)
+
+
+async def send_confirmation_result(watch: WatchTrade, confirmed: bool, reasoning: str):
+    """Notify the M1 confirmation result."""
+    if not _app:
+        return
+    chat_id = TELEGRAM_CHAT_ID
+    if not chat_id:
+        return
+
+    direction = "LONG" if watch.bias == "long" else "SHORT"
+    remaining = watch.max_confirmations - watch.confirmations_used
+
+    if confirmed:
+        msg = (
+            f"\u2705 {watch.symbol} {direction} \u2014 M1 CONFIRMED!\n"
+            f"\u2501" * 20 + "\n"
+            f"\U0001f194 Trade: {watch.id}\n"
+            f"\U0001f4ac {reasoning}\n\n"
+            f"Executing trade via MT5..."
+        )
+    else:
+        status = f"{remaining} attempts left" if remaining > 0 else "Watch cancelled"
+        msg = (
+            f"\u274c {watch.symbol} {direction} \u2014 M1 Rejected\n"
+            f"\u2501" * 20 + "\n"
+            f"\U0001f194 Watch: {watch.id}\n"
+            f"\U0001f4ac {reasoning}\n"
+            f"\u23f3 {status}"
+        )
+
+    try:
+        await _app.bot.send_message(chat_id=chat_id, text=msg)
+    except Exception as e:
+        logger.error("Failed to send confirmation result: %s", e)
+
+
+async def send_watch_expired(watch: WatchTrade):
+    """Notify that a watch has expired (kill zone ended)."""
+    if not _app:
+        return
+    chat_id = TELEGRAM_CHAT_ID
+    if not chat_id:
+        return
+
+    direction = "LONG" if watch.bias == "long" else "SHORT"
+    profile = get_profile(watch.symbol)
+    end_hour = profile.get("kill_zone_end_mez", 11)
+
+    msg = (
+        f"\u23f0 {watch.symbol} {direction} \u2014 Watch Expired\n"
+        f"\u2501" * 20 + "\n"
+        f"\U0001f194 Watch: {watch.id}\n"
+        f"London Kill Zone ended ({end_hour}:00 MEZ).\n"
+        f"Price never reached the entry zone with M1 confirmation."
+    )
+
+    try:
+        await _app.bot.send_message(chat_id=chat_id, text=msg)
+    except Exception as e:
+        logger.error("Failed to send watch expired: %s", e)
 
 
 def create_bot_app() -> Application:
