@@ -348,6 +348,12 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         h1_trend=setup.h1_trend,
                         counter_trend=setup.counter_trend,
                         raw_response=analysis.raw_response,
+                        trend_alignment=setup.trend_alignment,
+                        d1_trend=setup.d1_trend,
+                        entry_status=setup.entry_status,
+                        entry_distance_pips=setup.entry_distance_pips,
+                        negative_factors=", ".join(setup.negative_factors) if setup.negative_factors else "",
+                        price_zone=setup.price_zone,
                     )
                 except Exception as e:
                     logger.error("Failed to log trade: %s", e)
