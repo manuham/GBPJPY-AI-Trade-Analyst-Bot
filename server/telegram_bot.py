@@ -301,8 +301,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not passed:
                 await query.message.reply_text(
                     f"\U0001f6ab {symbol} TRADE BLOCKED\n"
-                    f"\u2501" * 20 + "\n"
-                    f"\u26a0\ufe0f {block_reason}\n\n"
+                    + "\u2501" * 20 + "\n"
+                    + f"\u26a0\ufe0f {block_reason}\n\n"
                     f"Wait for the condition to clear, then try again."
                 )
                 logger.info("[%s] Trade BLOCKED: %s", symbol, block_reason)
@@ -358,16 +358,11 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 direction = "LONG" if setup.bias == "long" else "SHORT"
 
-                news_warn = ""
-                if news_check.warning:
-                    news_warn = f"\n\u26a0\ufe0f News alert: {news_check.message}"
-
                 await query.message.reply_text(
                     f"\u2705 {symbol} {direction} trade queued for MT5!\n"
                     f"Trade ID: {trade_id}\n"
                     f"Entry: {_fmt(setup.entry_min, digits)} - {_fmt(setup.entry_max, digits)}\n"
                     f"SL: {_fmt(setup.stop_loss, digits)} | TP1: {_fmt(setup.tp1, digits)} | TP2: {_fmt(setup.tp2, digits)}\n"
-                    f"{news_warn}\n"
                     f"\u23f3 Waiting for MT5 EA to pick up..."
                 )
             else:
@@ -761,9 +756,9 @@ async def send_trade_close_notification(report):
     pnl_emoji = "\U0001f7e2" if report.profit >= 0 else "\U0001f534"
 
     msg = (
-        f"{reason_emoji} {symbol} Position Closed — {reason.upper()}\n"
-        f"\u2501" * 20 + "\n"
-        f"\U0001f194 Trade: {report.trade_id}\n"
+        f"{reason_emoji} {symbol} Position Closed \u2014 {reason.upper()}\n"
+        + "\u2501" * 20 + "\n"
+        + f"\U0001f194 Trade: {report.trade_id}\n"
         f"\U0001f4b0 Close: {report.close_price}\n"
         f"{pnl_emoji} Profit: ${report.profit:+.2f}\n"
     )
@@ -791,8 +786,8 @@ async def send_watch_started(watch: WatchTrade):
 
     msg = (
         f"\U0001f50d {watch.symbol} {direction} \u2014 Auto-Watching\n"
-        f"\u2501" * 20 + "\n"
-        f"\U0001f194 Watch ID: {watch.id}\n"
+        + "\u2501" * 20 + "\n"
+        + f"\U0001f194 Watch ID: {watch.id}\n"
         f"\U0001f4cd Zone: {watch.entry_min:.{digits}f} - {watch.entry_max:.{digits}f}\n"
         f"\U0001f525 Checklist: {watch.checklist_score} | Confidence: {watch.confidence.upper()}\n\n"
         f"EA is monitoring price. When zone is reached,\n"
@@ -819,8 +814,8 @@ async def send_zone_reached(watch: WatchTrade, attempt: int):
 
     msg = (
         f"\U0001f4cd {watch.symbol} {direction} \u2014 Zone Reached!\n"
-        f"\u2501" * 20 + "\n"
-        f"\U0001f194 Watch: {watch.id}\n"
+        + "\u2501" * 20 + "\n"
+        + f"\U0001f194 Watch: {watch.id}\n"
         f"Checking M1 for {reaction} reaction... (attempt {attempt}/{watch.max_confirmations})"
     )
 
@@ -844,8 +839,8 @@ async def send_confirmation_result(watch: WatchTrade, confirmed: bool, reasoning
     if confirmed:
         msg = (
             f"\u2705 {watch.symbol} {direction} \u2014 M1 CONFIRMED!\n"
-            f"\u2501" * 20 + "\n"
-            f"\U0001f194 Trade: {watch.id}\n"
+            + "\u2501" * 20 + "\n"
+            + f"\U0001f194 Trade: {watch.id}\n"
             f"\U0001f4ac {reasoning}\n\n"
             f"Executing trade via MT5..."
         )
@@ -853,8 +848,8 @@ async def send_confirmation_result(watch: WatchTrade, confirmed: bool, reasoning
         status = f"{remaining} attempts left" if remaining > 0 else "Watch cancelled"
         msg = (
             f"\u274c {watch.symbol} {direction} \u2014 M1 Rejected\n"
-            f"\u2501" * 20 + "\n"
-            f"\U0001f194 Watch: {watch.id}\n"
+            + "\u2501" * 20 + "\n"
+            + f"\U0001f194 Watch: {watch.id}\n"
             f"\U0001f4ac {reasoning}\n"
             f"\u23f3 {status}"
         )
@@ -879,8 +874,8 @@ async def send_watch_expired(watch: WatchTrade):
 
     msg = (
         f"\u23f0 {watch.symbol} {direction} \u2014 Watch Expired\n"
-        f"\u2501" * 20 + "\n"
-        f"\U0001f194 Watch: {watch.id}\n"
+        + "\u2501" * 20 + "\n"
+        + f"\U0001f194 Watch: {watch.id}\n"
         f"London Kill Zone ended ({end_hour}:00 MEZ).\n"
         f"Price never reached the entry zone with M1 confirmation."
     )
