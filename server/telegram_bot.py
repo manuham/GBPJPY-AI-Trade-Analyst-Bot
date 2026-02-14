@@ -446,7 +446,7 @@ async def _cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines += [
         "",
         "Session:",
-        "\u2022 London Kill Zone: 08:00-11:00 MEZ",
+        "\u2022 Watch window: 08:00-20:00 MEZ",
         "\u2022 GBPJPY only — smart entry with M1 confirmation",
     ]
 
@@ -664,7 +664,7 @@ async def _cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/help - Show this help message\n\n"
         "The bot analyzes GBPJPY during the London Kill Zone:\n"
         "\u2022 Analysis: 08:00 MEZ (London open)\n"
-        "\u2022 Watching: 08:00-11:00 MEZ (kill zone)\n"
+        "\u2022 Watching: 08:00-20:00 MEZ\n"
         "\u2022 Entry: M1 confirmation when price reaches zone\n\n"
         "High-confidence setups auto-watch (no manual approval).\n"
         "Lower confidence setups still show Execute/Skip buttons.\n"

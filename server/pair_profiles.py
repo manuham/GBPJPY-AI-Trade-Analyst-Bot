@@ -11,7 +11,7 @@ PAIR_PROFILES: dict[str, dict] = {
         "quote_currency": "JPY",
         "specialization": "GBPJPY London Kill Zone — Asian range sweep patterns",
         "kill_zone_start_mez": 8,
-        "kill_zone_end_mez": 11,
+        "kill_zone_end_mez": 20,
         "search_queries": [
             "GBPJPY forecast today",
             "GBP news today",
