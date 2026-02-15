@@ -1,31 +1,76 @@
-# GBPJPY AI Trade Analyst Bot
+# GBPJPY AI Trade Analyst Bot (v3.0)
 
-Automated GBPJPY analysis system that captures MetaTrader 5 chart screenshots at London open (08:00 CET) and NY open (14:30 CET), sends them to Claude's API for institutional-grade ICT analysis, and delivers trade setups via Telegram.
+Automated GBPJPY trading system using ICT methodology. The MT5 Expert Advisor captures chart screenshots at London open (08:00 MEZ), sends them to Claude for institutional-grade analysis, and manages the full trade lifecycle — from setup detection through smart zone-based entry with M1 confirmation to position close tracking.
 
-## Components
-
-| Component | Path | Description |
-|-----------|------|-------------|
-| MT5 Expert Advisor | `mt5/GBPJPY_Analyst.mq5` | Captures H1/M15/M5 screenshots + market data, sends to server |
-| FastAPI Server | `server/` | Receives data, calls Claude API with web search, sends results |
-| Telegram Bot | integrated in server | Delivers formatted trade setups with Execute/Skip buttons |
-
-## How It Works
+## Architecture
 
 ```
-MT5 EA ──screenshots + JSON──> FastAPI Server ──images + data──> Claude API
-                                     │                              │
-                                     │          analysis result <───┘
-                                     │
-                                     └──formatted alerts──> Telegram Bot ──> You
+MT5 EA (v6.00)                          FastAPI Server (Python)
+  │                                         │
+  ├─ 08:00 MEZ: Capture D1/H4/H1/M5 ──────→ POST /analyze
+  │              screenshots + market data   │
+  │                                         ├─ Tier 1: Sonnet screening (~$0.40)
+  │                                         │   └─ Quick viability check (H1+M5)
+  │                                         │
+  │                                         ├─ Tier 2: Opus full analysis (~$2.00)
+  │                                         │   └─ D1+H4+H1+M5 + web search
+  │                                         │   └─ ICT checklist scoring (12 points)
+  │                                         │
+  │                                         ├─→ Telegram: Setup alerts
+  │                                         │   └─ Auto-watch if checklist ≥7/12
+  │                                         │
+  ├─ Poll for watch zone ──────────────────→ GET /watch_trade
+  │                                         │
+  ├─ When price reaches zone: ─────────────→ POST /confirm_entry
+  │   Send M1 screenshot                    │   └─ Haiku M1 check (~$0.05)
+  │                                         │
+  ├─ Pick up confirmed trade ──────────────→ GET /pending_trade
+  │   Execute market orders                 │
+  │                                         │
+  ├─ Report execution ─────────────────────→ POST /trade_executed
+  ├─ Report close (TP/SL) ────────────────→ POST /trade_closed
+  │                                         │
+  └─ Watch expires at 20:00 MEZ             └─ SQLite tracking + Telegram alerts
 ```
 
-1. The EA runs on a GBPJPY chart and triggers at session open times
-2. It captures screenshots of H1, M15, and M5 timeframes and gathers market data (bid/ask, ATR, OHLC)
-3. Everything is POSTed to the FastAPI server as multipart form data
-4. The server sends the images + data to Claude (with web search enabled for live fundamentals)
-5. Claude analyzes using ICT methodology (BOS, ChoCH, order blocks, FVGs, liquidity sweeps)
-6. Structured trade setups are delivered to Telegram with inline Execute/Skip buttons
+## Key Features
+
+**Analysis (ICT Methodology)**
+- Two-tier AI: Sonnet screens quickly, Opus analyzes deeply (saves cost on dead markets)
+- 4 timeframes: D1 (strategic bias), H4 (OTE zones), H1 (structure), M5 (entry triggers)
+- 12-point ICT entry checklist: BOS, ChoCH, Order Blocks, FVGs, liquidity sweeps, OTE alignment
+- Daily web search for fundamentals (cached per pair per day)
+
+**Smart Entry (v3.0)**
+- No blind limit orders — EA watches entry zone locally (zero API cost)
+- When price reaches zone: M1 Haiku confirmation checks for bullish/bearish reaction
+- Max 3 confirmation attempts per setup, 60s cooldown between checks
+- High-confidence setups (checklist ≥7/12) auto-watch without manual approval
+
+**Risk Management (FTMO-compliant)**
+- News filter: blocks trades ±2 min around high-impact events
+- Daily drawdown limit (default 3%)
+- Max open trades cap (default 2)
+- Correlation conflict prevention
+- SL hard cap at 70 pips
+
+**Trade Lifecycle**
+- Full tracking: queued → executed → TP1/TP2/SL → closed
+- Break-even after TP1, trailing stop to TP2
+- SQLite persistence with performance stats
+- Telegram notifications at every stage
+
+## Telegram Commands
+
+| Command | Description |
+|---------|-------------|
+| `/scan` | Re-analyze or re-send last result |
+| `/status` | Bot status and last scan time |
+| `/stats` | Performance stats (win rate, P&L, by confidence) |
+| `/drawdown` | Daily P&L and risk dashboard |
+| `/news` | Upcoming high-impact news events |
+| `/reset` | Force-close stale open trades in DB |
+| `/help` | Show all commands |
 
 ## Quick Start
 
@@ -37,40 +82,90 @@ cp server/.env.example server/.env
 # Edit server/.env with your API keys
 
 # 2. Run with Docker
-docker compose up -d --build
+docker-compose build --no-cache
+docker-compose up -d
 
 # 3. Install the EA in MT5 (see setup.md)
 ```
 
-## Telegram Commands
-
-- `/scan` — trigger manual analysis or re-send last result
-- `/status` — show bot status and last scan time
-- `/help` — show available commands
-
-## Setup
-
-See [setup.md](setup.md) for full deployment instructions including:
-- Creating a Telegram bot
-- Getting an Anthropic API key
-- Deploying to a VPS
-- Configuring the MT5 EA
-- Testing the connection
+See [setup.md](setup.md) for full deployment instructions.
 
 ## Project Structure
 
 ```
 ├── mt5/
-│   └── GBPJPY_Analyst.mq5      # MetaTrader 5 Expert Advisor
+│   ├── AI_Analyst.mq5            # MT5 Expert Advisor (v6.00)
+│   ├── GBPJPY_Analyst.mq5       # Legacy EA (deprecated)
+│   └── SwingLevels.mq5          # Swing high/low indicator (v2.00)
 ├── server/
-│   ├── main.py                  # FastAPI app and endpoints
-│   ├── analyzer.py              # Claude API integration
-│   ├── telegram_bot.py          # Telegram bot logic
-│   ├── config.py                # Environment variable config
-│   ├── models.py                # Pydantic data models
-│   ├── requirements.txt         # Python dependencies
-│   └── .env.example             # Environment variable template
+│   ├── main.py                   # FastAPI app — endpoints, watch system, trade queue
+│   ├── analyzer.py               # Claude API — two-tier analysis + Haiku confirmation
+│   ├── telegram_bot.py           # Telegram — alerts, commands, Execute/Skip buttons
+│   ├── trade_tracker.py          # SQLite — trade lifecycle, P&L, performance stats
+│   ├── news_filter.py            # FTMO — ForexFactory calendar, ±2 min blocking
+│   ├── pair_profiles.py          # Per-pair config (digits, spreads, kill zone times)
+│   ├── models.py                 # Pydantic models (MarketData, TradeSetup, WatchTrade)
+│   ├── config.py                 # Environment variables
+│   ├── requirements.txt          # Python dependencies
+│   └── .env.example              # Environment variable template
+├── docs/
+│   ├── GBPJPY_ICT_Strategy_Research.docx
+│   ├── Integration_Notes.md
+│   └── MQL5_Implementation_Spec.md
 ├── Dockerfile
 ├── docker-compose.yml
-└── setup.md                     # Deployment guide
+├── setup.md                      # Deployment guide
+└── CLAUDE.md                     # Claude Code project context
+```
+
+## Cost Estimate
+
+| Component | Cost | When |
+|-----------|------|------|
+| Sonnet screening | ~$0.40 | Every scan |
+| Opus full analysis | ~$2.00 | Only when Sonnet finds a setup |
+| Haiku M1 confirmation | ~$0.03-0.08 | Only when price reaches zone (max 3x) |
+| Fundamentals web search | ~$0.30 | Once per pair per day (cached) |
+| **Daily total** | **~$2.50-5.00** | 1-2 scans/day + confirmations |
+
+## Configuration
+
+### Environment Variables (`server/.env`)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ANTHROPIC_API_KEY` | — | Claude API key |
+| `TELEGRAM_BOT_TOKEN` | — | Telegram bot token |
+| `TELEGRAM_CHAT_ID` | — | Your Telegram chat ID |
+| `HOST` | `0.0.0.0` | Server bind address |
+| `PORT` | `8000` | Server port |
+| `LOG_LEVEL` | `INFO` | Logging level |
+| `MAX_DAILY_DRAWDOWN_PCT` | `3.0` | Daily drawdown limit (%) |
+| `MAX_OPEN_TRADES` | `2` | Max concurrent open trades |
+
+### MT5 EA Key Inputs
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `InpServerURL` | `http://127.0.0.1:8000` | Server base URL |
+| `InpRiskPercent` | `1.0` | Risk per trade (%) |
+| `InpKillZoneStart` | `8` | Analysis start hour (MEZ) |
+| `InpKillZoneEnd` | `11` | Kill zone end hour (MEZ) |
+| `InpConfirmCooldown` | `60` | Seconds between M1 checks |
+| `InpMode` | `leader` | `leader` (analyze+trade) or `follower` (trade only) |
+
+## Deployment
+
+**VPS:** Hetzner recommended, Ubuntu 22.04+, Docker installed
+
+```bash
+# Update
+ssh root@YOUR_VPS_IP
+cd GBPJPY-AI-Trade-Analyst-Bot
+git pull origin main
+docker-compose build --no-cache && docker-compose down && docker-compose up -d
+
+# Verify
+curl http://localhost:8000/health
+docker-compose logs -f
 ```
