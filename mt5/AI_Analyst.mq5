@@ -73,6 +73,11 @@ string   g_tradeBias     = "";  // "long" or "short"
 bool     g_tp1Hit        = false; // Whether TP1 has been hit (for break-even tracking)
 double   g_tp1ClosePct   = 50.0; // % of position to close at TP1 (from server)
 
+//--- Visual chart enhancements
+string   g_watchConfidence     = "";    // "HIGH", "MEDIUM", "LOW" from server
+string   g_watchChecklistScore = "";    // e.g. "10/12" from server
+double   g_watchRRatio         = 0;     // Risk:Reward ratio (calculated)
+
 //--- Trade object
 CTrade g_trade;
 
@@ -189,6 +194,7 @@ void OnDeinit(const int reason)
    EventKillTimer();
    ObjectDelete(0, "btnManualScan");
    ObjectDelete(0, "btnManualScanLabel");
+   DeleteAllVisuals();
 
    //--- Release indicator handles
    if(g_hATR_D1 != INVALID_HANDLE) IndicatorRelease(g_hATR_D1);
@@ -220,6 +226,7 @@ void OnTimer()
       g_killZoneScanned = false;
       g_hasWatch        = false;
       g_lastDay         = dt.day;
+      DeleteAllVisuals();
       Print("New day detected — scan flags reset.");
    }
 
@@ -269,6 +276,9 @@ void OnTimer()
    if(g_hasWatch)
       CheckZoneReached(mezHour);
 
+   //--- ALL MODES: Update chart visuals (entry zone, info panel)
+   UpdateVisuals();
+
    //--- ALL MODES: Poll for pending trades (confirmed by Haiku or manual Execute)
    if(TimeCurrent() - g_lastPollTime >= 10)
    {
@@ -308,6 +318,10 @@ void PollWatchTrade()
       {
          Print("Watch trade cleared by server.");
          g_hasWatch = false;
+         g_watchConfidence = "";
+         g_watchChecklistScore = "";
+         g_watchRRatio = 0;
+         DeleteAllVisuals();
       }
       return;
    }
@@ -329,6 +343,21 @@ void PollWatchTrade()
    g_watchSlPips   = JsonGetDouble(response, "sl_pips");
    g_watchMaxChecks = (int)JsonGetDouble(response, "max_confirmations");
    if(g_watchMaxChecks <= 0) g_watchMaxChecks = 3;
+
+   //--- Parse visual display fields
+   g_watchConfidence     = JsonGetString(response, "confidence");
+   g_watchChecklistScore = JsonGetString(response, "checklist_score");
+
+   //--- Calculate R:R ratio from entry midpoint to TP2 vs SL
+   if(g_watchSlPips > 0)
+   {
+      double entryMid = (g_watchZoneMin + g_watchZoneMax) / 2.0;
+      double tp2Pips  = MathAbs(g_watchTP2 - entryMid) / g_pipSize;
+      g_watchRRatio   = tp2Pips / g_watchSlPips;
+   }
+   else
+      g_watchRRatio = 0;
+
    g_hasWatch      = true;
    g_lastConfirmTime = 0;
 
@@ -349,6 +378,7 @@ void CheckZoneReached(int mezHour)
    {
       Print("Kill Zone ended (MEZ ", mezHour, ":00) — cancelling watch ", g_watchTradeId);
       g_hasWatch = false;
+      DeleteAllVisuals();
       return;
    }
 
@@ -401,6 +431,7 @@ void CheckZoneReached(int mezHour)
       if(remainingChecks <= 0 && StringFind(response, "remaining_checks") >= 0)
       {
          g_hasWatch = false;
+         DeleteAllVisuals();
          Print("M1 REJECTED — all confirmation attempts exhausted, watch cancelled");
       }
       else
@@ -849,6 +880,285 @@ void CreateManualButton()
    //--- Force chart to redraw so button appears immediately
    ChartRedraw(0);
    Print("Scan button created on chart.");
+}
+
+//+------------------------------------------------------------------+
+//| Delete all AI_ visual objects from chart                           |
+//+------------------------------------------------------------------+
+void DeleteAllVisuals()
+{
+   ObjectsDeleteAll(0, "AI_");
+   ChartRedraw(0);
+}
+
+//+------------------------------------------------------------------+
+//| Draw entry zone rectangle + SL/TP lines + labels                   |
+//+------------------------------------------------------------------+
+void DrawEntryZone()
+{
+   if(!g_hasWatch || g_watchTradeId == "") return;
+
+   //--- Time coordinates: 50 H1-bars back, 20 forward from current
+   datetime timeStart = iTime(_Symbol, PERIOD_H1, 50);
+   datetime timeEnd   = iTime(_Symbol, PERIOD_H1, 0) + 20 * PeriodSeconds(PERIOD_H1);
+   datetime timeLbl   = iTime(_Symbol, PERIOD_H1, 10);  // Label position
+
+   //--- Determine colors based on bias
+   color zoneColor, zoneBorder;
+   if(g_watchBias == "long")
+   {
+      zoneColor   = C'51,153,255';   // Blue
+      zoneBorder  = C'30,120,220';
+   }
+   else
+   {
+      zoneColor   = C'255,82,82';    // Red
+      zoneBorder  = C'220,50,50';
+   }
+
+   //--- Entry zone rectangle (semi-transparent, behind candles)
+   ObjectDelete(0, "AI_Zone");
+   ObjectCreate(0, "AI_Zone", OBJ_RECTANGLE, 0, timeStart, g_watchZoneMin, timeEnd, g_watchZoneMax);
+   ObjectSetInteger(0, "AI_Zone", OBJPROP_COLOR, zoneColor);
+   ObjectSetInteger(0, "AI_Zone", OBJPROP_FILL, true);
+   ObjectSetInteger(0, "AI_Zone", OBJPROP_BACK, true);
+   ObjectSetInteger(0, "AI_Zone", OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, "AI_Zone", OBJPROP_HIDDEN, true);
+
+   //--- Zone label text: "SHORT | 8/12 | HIGH | R:R 1:2.5"
+   string biasStr = (g_watchBias == "long") ? "LONG" : "SHORT";
+   string rrStr   = (g_watchRRatio > 0) ? ("R:R 1:" + DoubleToString(g_watchRRatio, 1)) : "";
+   string zoneText = biasStr + " Entry Zone";
+   if(g_watchChecklistScore != "")
+      zoneText += " | " + g_watchChecklistScore;
+   if(g_watchConfidence != "")
+      zoneText += " | " + g_watchConfidence;
+   if(rrStr != "")
+      zoneText += " | " + rrStr;
+
+   double zoneMid = (g_watchZoneMin + g_watchZoneMax) / 2.0;
+   ObjectDelete(0, "AI_LblZone");
+   ObjectCreate(0, "AI_LblZone", OBJ_TEXT, 0, timeLbl, zoneMid);
+   ObjectSetString(0, "AI_LblZone", OBJPROP_TEXT, zoneText);
+   ObjectSetString(0, "AI_LblZone", OBJPROP_FONT, "Arial Bold");
+   ObjectSetInteger(0, "AI_LblZone", OBJPROP_FONTSIZE, 9);
+   ObjectSetInteger(0, "AI_LblZone", OBJPROP_COLOR, zoneColor);
+   ObjectSetInteger(0, "AI_LblZone", OBJPROP_ANCHOR, ANCHOR_CENTER);
+   ObjectSetInteger(0, "AI_LblZone", OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, "AI_LblZone", OBJPROP_HIDDEN, true);
+
+   //--- Entry midpoint for pip calculations
+   double entryMid = (g_watchZoneMin + g_watchZoneMax) / 2.0;
+
+   //--- SL line (red dashed, width 2)
+   double slPips = MathAbs(g_watchSL - entryMid) / g_pipSize;
+   ObjectDelete(0, "AI_LineSL");
+   ObjectCreate(0, "AI_LineSL", OBJ_HLINE, 0, 0, g_watchSL);
+   ObjectSetInteger(0, "AI_LineSL", OBJPROP_COLOR, clrRed);
+   ObjectSetInteger(0, "AI_LineSL", OBJPROP_STYLE, STYLE_DASH);
+   ObjectSetInteger(0, "AI_LineSL", OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, "AI_LineSL", OBJPROP_BACK, true);
+   ObjectSetInteger(0, "AI_LineSL", OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, "AI_LineSL", OBJPROP_HIDDEN, true);
+
+   //--- SL label
+   ObjectDelete(0, "AI_LblSL");
+   ObjectCreate(0, "AI_LblSL", OBJ_TEXT, 0, timeLbl, g_watchSL);
+   ObjectSetString(0, "AI_LblSL", OBJPROP_TEXT, "SL  " + DoubleToString(g_watchSL, g_digits) + "  (" + DoubleToString(slPips, 1) + " pips)");
+   ObjectSetString(0, "AI_LblSL", OBJPROP_FONT, "Arial");
+   ObjectSetInteger(0, "AI_LblSL", OBJPROP_FONTSIZE, 8);
+   ObjectSetInteger(0, "AI_LblSL", OBJPROP_COLOR, clrRed);
+   ObjectSetInteger(0, "AI_LblSL", OBJPROP_ANCHOR, ANCHOR_LEFT);
+   ObjectSetInteger(0, "AI_LblSL", OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, "AI_LblSL", OBJPROP_HIDDEN, true);
+
+   //--- TP1 line (green dashed, width 1)
+   double tp1Pips = MathAbs(g_watchTP1 - entryMid) / g_pipSize;
+   ObjectDelete(0, "AI_LineTP1");
+   ObjectCreate(0, "AI_LineTP1", OBJ_HLINE, 0, 0, g_watchTP1);
+   ObjectSetInteger(0, "AI_LineTP1", OBJPROP_COLOR, clrLimeGreen);
+   ObjectSetInteger(0, "AI_LineTP1", OBJPROP_STYLE, STYLE_DASH);
+   ObjectSetInteger(0, "AI_LineTP1", OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, "AI_LineTP1", OBJPROP_BACK, true);
+   ObjectSetInteger(0, "AI_LineTP1", OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, "AI_LineTP1", OBJPROP_HIDDEN, true);
+
+   //--- TP1 label
+   ObjectDelete(0, "AI_LblTP1");
+   ObjectCreate(0, "AI_LblTP1", OBJ_TEXT, 0, timeLbl, g_watchTP1);
+   ObjectSetString(0, "AI_LblTP1", OBJPROP_TEXT, "TP1  " + DoubleToString(g_watchTP1, g_digits) + "  (+" + DoubleToString(tp1Pips, 1) + " pips)");
+   ObjectSetString(0, "AI_LblTP1", OBJPROP_FONT, "Arial");
+   ObjectSetInteger(0, "AI_LblTP1", OBJPROP_FONTSIZE, 8);
+   ObjectSetInteger(0, "AI_LblTP1", OBJPROP_COLOR, clrLimeGreen);
+   ObjectSetInteger(0, "AI_LblTP1", OBJPROP_ANCHOR, ANCHOR_LEFT);
+   ObjectSetInteger(0, "AI_LblTP1", OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, "AI_LblTP1", OBJPROP_HIDDEN, true);
+
+   //--- TP2 line (green solid, width 2)
+   double tp2Pips = MathAbs(g_watchTP2 - entryMid) / g_pipSize;
+   ObjectDelete(0, "AI_LineTP2");
+   ObjectCreate(0, "AI_LineTP2", OBJ_HLINE, 0, 0, g_watchTP2);
+   ObjectSetInteger(0, "AI_LineTP2", OBJPROP_COLOR, clrGreen);
+   ObjectSetInteger(0, "AI_LineTP2", OBJPROP_STYLE, STYLE_SOLID);
+   ObjectSetInteger(0, "AI_LineTP2", OBJPROP_WIDTH, 2);
+   ObjectSetInteger(0, "AI_LineTP2", OBJPROP_BACK, true);
+   ObjectSetInteger(0, "AI_LineTP2", OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, "AI_LineTP2", OBJPROP_HIDDEN, true);
+
+   //--- TP2 label
+   ObjectDelete(0, "AI_LblTP2");
+   ObjectCreate(0, "AI_LblTP2", OBJ_TEXT, 0, timeLbl, g_watchTP2);
+   ObjectSetString(0, "AI_LblTP2", OBJPROP_TEXT, "TP2  " + DoubleToString(g_watchTP2, g_digits) + "  (+" + DoubleToString(tp2Pips, 1) + " pips)");
+   ObjectSetString(0, "AI_LblTP2", OBJPROP_FONT, "Arial");
+   ObjectSetInteger(0, "AI_LblTP2", OBJPROP_FONTSIZE, 8);
+   ObjectSetInteger(0, "AI_LblTP2", OBJPROP_COLOR, clrGreen);
+   ObjectSetInteger(0, "AI_LblTP2", OBJPROP_ANCHOR, ANCHOR_LEFT);
+   ObjectSetInteger(0, "AI_LblTP2", OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, "AI_LblTP2", OBJPROP_HIDDEN, true);
+}
+
+//+------------------------------------------------------------------+
+//| Draw info panel (top-right corner dashboard)                       |
+//+------------------------------------------------------------------+
+void DrawInfoPanel()
+{
+   //--- Panel dimensions
+   int panelX = 15;    // Distance from right edge
+   int panelY = 30;    // Distance from top edge
+   int panelW = 260;
+   int lineH  = 22;    // Line height in pixels
+   int padX   = 12;    // Text padding from panel left
+   int padY   = 8;     // Text padding from panel top
+
+   //--- Determine panel height based on content
+   int numLines = 11;  // Title + separator + 9 data lines
+   int panelH   = padY * 2 + numLines * lineH;
+
+   //--- Background rectangle
+   ObjectDelete(0, "AI_PanelBG");
+   ObjectCreate(0, "AI_PanelBG", OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, "AI_PanelBG", OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+   ObjectSetInteger(0, "AI_PanelBG", OBJPROP_XDISTANCE, panelX);
+   ObjectSetInteger(0, "AI_PanelBG", OBJPROP_YDISTANCE, panelY);
+   ObjectSetInteger(0, "AI_PanelBG", OBJPROP_XSIZE, panelW);
+   ObjectSetInteger(0, "AI_PanelBG", OBJPROP_YSIZE, panelH);
+   ObjectSetInteger(0, "AI_PanelBG", OBJPROP_BGCOLOR, C'30,30,35');
+   ObjectSetInteger(0, "AI_PanelBG", OBJPROP_BORDER_COLOR, C'80,80,90');
+   ObjectSetInteger(0, "AI_PanelBG", OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, "AI_PanelBG", OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, "AI_PanelBG", OBJPROP_BACK, false);
+   ObjectSetInteger(0, "AI_PanelBG", OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, "AI_PanelBG", OBJPROP_HIDDEN, true);
+
+   //--- Helper variables for label positioning
+   //--- In CORNER_RIGHT_UPPER, XDISTANCE is from the right edge, so
+   //--- text needs to be just inside the panel's right edge (panel starts at panelX from right)
+   int textX = panelX + panelW - padX;  // Left edge of text inside panel
+   int curY  = panelY + padY;
+
+   //--- Title: "AI Trade Analyst"
+   CreatePanelLabel("AI_PanelTitle", textX, curY, "AI Trade Analyst", "Arial Bold", 11, clrWhite);
+   curY += lineH;
+
+   //--- Separator line (using thin text)
+   CreatePanelLabel("AI_PanelSep", textX, curY, "--------------------------------------", "Arial", 7, C'80,80,90');
+   curY += (int)(lineH * 0.7);
+
+   //--- Status
+   string statusText = "NO SETUP";
+   color  statusClr  = C'120,120,130';
+   if(g_hasWatch)
+   {
+      statusText = "WATCHING";
+      statusClr  = clrCyan;
+   }
+   CreatePanelLabel("AI_PanelStatus", textX, curY, "Status:  " + statusText, "Arial Bold", 10, statusClr);
+   curY += lineH;
+
+   if(!g_hasWatch)
+   {
+      //--- No watch — just show status, done
+      ChartRedraw(0);
+      return;
+   }
+
+   //--- Bias (color-coded)
+   string biasStr = (g_watchBias == "long") ? "LONG" : "SHORT";
+   color  biasClr = (g_watchBias == "long") ? C'51,153,255' : C'255,82,82';
+   CreatePanelLabel("AI_PanelBias", textX, curY, "Bias:  " + biasStr, "Arial Bold", 10, biasClr);
+   curY += lineH;
+
+   //--- Checklist Score
+   color scoreClr = clrYellow;
+   CreatePanelLabel("AI_PanelScore", textX, curY, "Checklist:  " + g_watchChecklistScore, "Arial", 9, scoreClr);
+   curY += lineH;
+
+   //--- Confidence
+   color confClr = clrLimeGreen;
+   if(g_watchConfidence == "LOW") confClr = clrOrangeRed;
+   else if(g_watchConfidence == "MEDIUM") confClr = clrOrange;
+   CreatePanelLabel("AI_PanelConf", textX, curY, "Confidence:  " + g_watchConfidence, "Arial", 9, confClr);
+   curY += lineH;
+
+   //--- R:R Ratio
+   string rrText = (g_watchRRatio > 0) ? ("1 : " + DoubleToString(g_watchRRatio, 1)) : "N/A";
+   CreatePanelLabel("AI_PanelRR", textX, curY, "R:R:  " + rrText, "Arial", 9, clrOrange);
+   curY += lineH;
+
+   //--- Entry Zone
+   string entryText = DoubleToString(g_watchZoneMin, g_digits) + " - " + DoubleToString(g_watchZoneMax, g_digits);
+   CreatePanelLabel("AI_PanelEntry", textX, curY, "Entry:  " + entryText, "Arial", 9, clrWhite);
+   curY += lineH;
+
+   //--- SL
+   CreatePanelLabel("AI_PanelSL", textX, curY, "SL:  " + DoubleToString(g_watchSL, g_digits) + "  (" + DoubleToString(g_watchSlPips, 1) + "p)", "Arial", 9, clrRed);
+   curY += lineH;
+
+   //--- TP1
+   double tp1Pips = MathAbs(g_watchTP1 - (g_watchZoneMin + g_watchZoneMax) / 2.0) / g_pipSize;
+   CreatePanelLabel("AI_PanelTP1", textX, curY, "TP1:  " + DoubleToString(g_watchTP1, g_digits) + "  (+" + DoubleToString(tp1Pips, 1) + "p)", "Arial", 9, clrLimeGreen);
+   curY += lineH;
+
+   //--- TP2
+   double tp2Pips = MathAbs(g_watchTP2 - (g_watchZoneMin + g_watchZoneMax) / 2.0) / g_pipSize;
+   CreatePanelLabel("AI_PanelTP2", textX, curY, "TP2:  " + DoubleToString(g_watchTP2, g_digits) + "  (+" + DoubleToString(tp2Pips, 1) + "p)", "Arial", 9, clrGreen);
+}
+
+//+------------------------------------------------------------------+
+//| Helper: create a screen-anchored label for the info panel          |
+//+------------------------------------------------------------------+
+void CreatePanelLabel(string name, int x, int y, string text, string font, int fontSize, color clr)
+{
+   ObjectDelete(0, name);
+   ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+   ObjectSetString(0, name, OBJPROP_TEXT, text);
+   ObjectSetString(0, name, OBJPROP_FONT, font);
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, fontSize);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+}
+
+//+------------------------------------------------------------------+
+//| Update all chart visuals (called from OnTimer)                     |
+//+------------------------------------------------------------------+
+void UpdateVisuals()
+{
+   if(g_hasWatch && g_watchTradeId != "")
+   {
+      DrawEntryZone();
+      DrawInfoPanel();
+      ChartRedraw(0);
+   }
+   else
+   {
+      //--- Only delete if objects still exist
+      if(ObjectFind(0, "AI_PanelBG") >= 0 || ObjectFind(0, "AI_Zone") >= 0)
+         DeleteAllVisuals();
+   }
 }
 
 //+------------------------------------------------------------------+
