@@ -81,6 +81,7 @@ class TradeSetup(BaseModel):
     entry_status: str = ""  # "at_zone", "approaching", "requires_pullback"
     negative_factors: list[str] = []
     checklist_score: str = ""  # e.g. "10/12" from ICT entry checklist
+    tp1_close_pct: float = 50.0  # % of position to close at TP1 (server-calculated)
 
 
 class AnalysisResult(BaseModel):
@@ -108,6 +109,7 @@ class PendingTrade(BaseModel):
     tp2: float
     sl_pips: float
     confidence: str
+    tp1_close_pct: float = 50.0  # % of position to close at TP1
     queued_at: float = 0.0  # Unix timestamp — for multi-consumer expiry (60s window)
 
 
@@ -125,6 +127,7 @@ class WatchTrade(BaseModel):
     confidence: str
     confluence: list[str] = []       # Passed to Haiku for context
     checklist_score: str = ""
+    tp1_close_pct: float = 50.0      # % of position to close at TP1
     created_at: float = 0.0          # Unix timestamp when watch started
     max_confirmations: int = 10      # Max Haiku checks before giving up
     confirmations_used: int = 0      # How many times Haiku was called

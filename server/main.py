@@ -4,9 +4,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import shutil
 import time
 import uuid
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -28,7 +31,11 @@ from telegram_bot import (
     set_scan_callback,
     store_analysis,
 )
-from trade_tracker import init_db, log_trade_executed, log_trade_closed, get_stats as get_trade_stats, cleanup_stale_open_trades
+from trade_tracker import (
+    init_db, log_trade_executed, log_trade_closed, get_stats as get_trade_stats,
+    cleanup_stale_open_trades, log_scan_completed, get_last_scan_for_symbol,
+    persist_watch, load_active_watches, delete_watch, update_watch_status,
+)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -122,9 +129,13 @@ async def _run_analysis(
         result = await analyze_charts(d1, h4, h1, m5, market_data)
         _last_results[symbol] = result
         store_analysis(result)
+        log_scan_completed(symbol)
         logger.info(
             "[%s] Analysis complete: %d setups found", symbol, len(result.setups)
         )
+
+        # Archive screenshots for backtesting
+        _archive_screenshots(symbol, {"d1": d1, "h4": h4, "h1": h1, "m5": m5})
 
         # --- Auto-queue qualifying setups as watch trades ---
         auto_queued_indices: set[int] = set()
@@ -137,6 +148,7 @@ async def _run_analysis(
                 if passed:
                     watch = _create_watch_trade(symbol, setup)
                     _watch_trades[symbol] = watch
+                    persist_watch(watch.id, symbol, watch.model_dump_json())
                     auto_queued_indices.add(i)
                     logger.info("[%s] Auto-queued watch: %s %s (checklist %s)",
                                 symbol, setup.bias.upper(), watch.id, setup.checklist_score)
@@ -165,6 +177,15 @@ def _parse_checklist_score(score: str) -> int:
 
 def _create_watch_trade(symbol: str, setup) -> WatchTrade:
     """Create a WatchTrade from a TradeSetup."""
+    # Adaptive TP1 close %: high confidence → let more ride, low → take profit early
+    checklist_num = _parse_checklist_score(setup.checklist_score)
+    if checklist_num >= 10:
+        tp1_pct = 40.0  # High confidence: close less at TP1, let 60% ride to TP2
+    elif checklist_num >= 7:
+        tp1_pct = 50.0  # Medium: balanced 50/50
+    else:
+        tp1_pct = 60.0  # Lower confidence: take more profit at TP1
+
     return WatchTrade(
         id=uuid.uuid4().hex[:8],
         symbol=symbol,
@@ -178,8 +199,54 @@ def _create_watch_trade(symbol: str, setup) -> WatchTrade:
         confidence=setup.confidence,
         confluence=setup.confluence[:3] if setup.confluence else [],
         checklist_score=setup.checklist_score,
+        tp1_close_pct=tp1_pct,
         created_at=time.time(),
     )
+
+
+# ---------------------------------------------------------------------------
+# Screenshot archiving — save for replay / backtesting
+# ---------------------------------------------------------------------------
+SCREENSHOTS_DIR = os.path.join(os.getenv("DATA_DIR", "/data"), "screenshots")
+SCREENSHOT_RETENTION_DAYS = 30
+
+
+def _archive_screenshots(symbol: str, screenshots: dict[str, bytes]):
+    """Save screenshots to disk for backtesting / review."""
+    try:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        screenshot_dir = Path(SCREENSHOTS_DIR) / f"{today}_{symbol}"
+        screenshot_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%H%M%S")
+        for tf, data in screenshots.items():
+            if data:
+                path = screenshot_dir / f"{ts}_{tf}.png"
+                path.write_bytes(data)
+        logger.info("[%s] Screenshots archived to %s", symbol, screenshot_dir)
+    except Exception as e:
+        logger.error("[%s] Failed to archive screenshots: %s", symbol, e)
+
+
+def _cleanup_old_screenshots():
+    """Delete screenshots older than SCREENSHOT_RETENTION_DAYS."""
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=SCREENSHOT_RETENTION_DAYS)
+        screenshots_path = Path(SCREENSHOTS_DIR)
+        if not screenshots_path.exists():
+            return
+        for d in screenshots_path.iterdir():
+            if not d.is_dir():
+                continue
+            date_str = d.name.split("_")[0]
+            try:
+                dir_date = datetime.strptime(date_str, "%Y-%m-%d")
+                if dir_date.date() < cutoff.date():
+                    shutil.rmtree(d)
+                    logger.info("Deleted old screenshots: %s", d)
+            except (ValueError, OSError):
+                pass
+    except Exception as e:
+        logger.error("Screenshot cleanup error: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +258,23 @@ async def lifespan(app: FastAPI):
     logger.info("Starting AI Trade Analyst server on %s:%s", config.HOST, config.PORT)
     init_db()
     cleanup_stale_open_trades()
+
+    # --- Restore persisted watch trades ---
+    try:
+        saved_watches = load_active_watches()
+        for row in saved_watches:
+            watch = WatchTrade.model_validate_json(row["watch_json"])
+            if watch.status == "watching":
+                _watch_trades[watch.symbol] = watch
+                logger.info("[%s] Restored watch %s from DB", watch.symbol, watch.id)
+        if saved_watches:
+            logger.info("Restored %d active watch(es) from database", len(saved_watches))
+    except Exception as e:
+        logger.error("Failed to restore watches: %s", e)
+
+    # --- Cleanup old screenshots ---
+    _cleanup_old_screenshots()
+
     try:
         bot_app = create_bot_app()
         set_scan_callback(_run_scan_from_telegram)
@@ -204,8 +288,36 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error("Failed to start Telegram bot: %s", e)
 
-    # Start watch expiry background task
-    expiry_task = asyncio.create_task(_watch_expiry_loop())
+    # --- Send startup notification to Telegram ---
+    try:
+        from telegram_bot import send_startup_notification
+        await send_startup_notification()
+    except Exception as e:
+        logger.error("Failed to send startup notification: %s", e)
+
+    # --- Check if today's scan was missed ---
+    try:
+        now_mez = datetime.now(timezone(timedelta(hours=1)))
+        for symbol in ["GBPJPY"]:
+            profile = get_profile(symbol)
+            kz_start = profile.get("kill_zone_start_mez", 8)
+            kz_end = profile.get("kill_zone_end_mez", 20)
+            last_scan = get_last_scan_for_symbol(symbol)
+            today_str = now_mez.strftime("%Y-%m-%d")
+            scan_done_today = last_scan and last_scan["scan_date"] == today_str
+
+            if not scan_done_today and kz_start <= now_mez.hour < kz_end:
+                logger.warning("[%s] Missed today's scan — sending alert", symbol)
+                try:
+                    from telegram_bot import send_missed_scan_alert
+                    await send_missed_scan_alert(symbol, now_mez.hour)
+                except Exception as e:
+                    logger.error("[%s] Failed to send missed scan alert: %s", symbol, e)
+    except Exception as e:
+        logger.error("Startup scan check error: %s", e)
+
+    # Start background tasks
+    expiry_task = asyncio.create_task(_system_tasks_loop())
 
     yield
 
@@ -482,6 +594,7 @@ async def confirm_entry_endpoint(
     if confirmed:
         # Convert watch → pending trade for MT5 to pick up via /pending_trade
         watch.status = "confirmed"
+        delete_watch(watch.id)
         pending = PendingTrade(
             id=watch.id,
             symbol=symbol,
@@ -493,6 +606,7 @@ async def confirm_entry_endpoint(
             tp2=watch.tp2,
             sl_pips=watch.sl_pips,
             confidence=watch.confidence,
+            tp1_close_pct=watch.tp1_close_pct,
         )
         queue_pending_trade(pending)
 
@@ -543,6 +657,7 @@ async def confirm_entry_endpoint(
     else:
         if remaining <= 0:
             watch.status = "rejected"
+            delete_watch(watch.id)
             logger.info("[%s] M1 REJECTED — max attempts reached, watch cancelled", symbol)
         else:
             logger.info("[%s] M1 REJECTED — %d attempts remaining", symbol, remaining)
@@ -634,10 +749,16 @@ async def telegram_webhook(request: Request):
 
 
 # ---------------------------------------------------------------------------
-# Watch expiry background task
+# Background tasks — watch expiry + scan deadline + weekly report
 # ---------------------------------------------------------------------------
-async def _watch_expiry_loop():
-    """Expire active watches when the London Kill Zone ends (11:00 MEZ)."""
+_scan_deadline_alerted_today: set[str] = set()  # prevent duplicate alerts
+_weekly_report_sent = False
+
+
+async def _system_tasks_loop():
+    """Background loop: watch expiry, scan deadline check, weekly report."""
+    global _weekly_report_sent
+
     while True:
         try:
             await asyncio.sleep(60)  # Check every minute
@@ -645,7 +766,9 @@ async def _watch_expiry_loop():
             # MEZ = UTC+1 (CET), MESZ = UTC+2 (CEST) — use UTC+1 for simplicity
             now_mez = datetime.now(timezone(timedelta(hours=1)))
             mez_hour = now_mez.hour
+            today_str = now_mez.strftime("%Y-%m-%d")
 
+            # --- Watch expiry ---
             for symbol, watch in list(_watch_trades.items()):
                 if watch.status != "watching":
                     continue
@@ -655,6 +778,7 @@ async def _watch_expiry_loop():
 
                 if mez_hour >= kill_zone_end:
                     watch.status = "expired"
+                    delete_watch(watch.id)
                     logger.info("[%s] Watch %s expired — Kill Zone ended (%d:00 MEZ)",
                                 symbol, watch.id, kill_zone_end)
                     try:
@@ -663,10 +787,42 @@ async def _watch_expiry_loop():
                     except Exception as e:
                         logger.error("[%s] Failed to send watch expiry notification: %s", symbol, e)
 
+            # --- Scan deadline check (08:30 MEZ) ---
+            if mez_hour == 8 and 25 <= now_mez.minute < 35:
+                for symbol in ["GBPJPY"]:
+                    alert_key = f"{symbol}_{today_str}"
+                    if alert_key in _scan_deadline_alerted_today:
+                        continue
+                    last_scan = get_last_scan_for_symbol(symbol)
+                    if not last_scan or last_scan["scan_date"] != today_str:
+                        _scan_deadline_alerted_today.add(alert_key)
+                        logger.warning("[%s] 08:30 MEZ — no scan yet today!", symbol)
+                        try:
+                            from telegram_bot import send_scan_deadline_warning
+                            await send_scan_deadline_warning(symbol)
+                        except Exception as e:
+                            logger.error("[%s] Failed to send deadline warning: %s", symbol, e)
+
+            # --- Reset daily alerts at midnight MEZ ---
+            if mez_hour == 0 and now_mez.minute < 5:
+                _scan_deadline_alerted_today.clear()
+
+            # --- Weekly report (Sunday 19:00 MEZ) ---
+            if now_mez.weekday() == 6 and mez_hour == 19 and now_mez.minute < 5:
+                if not _weekly_report_sent:
+                    _weekly_report_sent = True
+                    try:
+                        from telegram_bot import send_weekly_report
+                        await send_weekly_report()
+                    except Exception as e:
+                        logger.error("Failed to send weekly report: %s", e)
+            elif now_mez.weekday() != 6 or mez_hour != 19:
+                _weekly_report_sent = False
+
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logger.error("Watch expiry loop error: %s", e)
+            logger.error("System tasks loop error: %s", e)
 
 
 # ---------------------------------------------------------------------------

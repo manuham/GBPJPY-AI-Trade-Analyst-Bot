@@ -17,11 +17,14 @@ An automated GBPJPY forex trading system (v3.0) that uses ICT (Inner Circle Trad
   → Telegram alert with ICT checklist score, R:R, confluence
   → Auto-watch if checklist ≥7/12 (no manual button needed)
   → EA monitors entry zone locally (zero API cost)
-  → When zone reached: M1 Haiku confirmation (~$0.05, max 3 attempts)
+  → When zone reached: M1 Haiku confirmation (~$0.05, max 10 attempts)
   → If confirmed: market order execution
-  → TP1 closes 50%, break-even, trail to TP2
+  → TP1 closes adaptive % (40-60% based on checklist score), break-even, trail to TP2
   → Trade close reported to SQLite + Telegram
-  → Watches expire at 20:00 MEZ
+  → Screenshots archived to /data/screenshots/ for backtesting
+  → Watches expire at 20:00 MEZ (persisted across restarts)
+  → Startup: alerts if scan missed, restores watches from DB
+  → Weekly performance report auto-sent Sunday 19:00 MEZ
 ```
 
 ## File Map

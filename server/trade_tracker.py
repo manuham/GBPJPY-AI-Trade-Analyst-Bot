@@ -130,7 +130,161 @@ def init_db():
                 conn.execute(migration)
             except sqlite3.OperationalError:
                 pass  # Column already exists
+    # --- scan_metadata table ---
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS scan_metadata (
+            symbol TEXT PRIMARY KEY,
+            last_scan_time TEXT,
+            scan_date TEXT
+        );
+        CREATE TABLE IF NOT EXISTS watch_trades_persist (
+            id TEXT PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            watch_json TEXT NOT NULL,
+            status TEXT DEFAULT 'watching',
+            created_at TEXT
+        );
+    """)
     logger.info("Trade tracker database initialized at %s", DB_PATH)
+
+
+# ---------------------------------------------------------------------------
+# Scan metadata — track when last scan happened per symbol
+# ---------------------------------------------------------------------------
+def log_scan_completed(symbol: str):
+    """Record that today's scan completed for this symbol."""
+    now = datetime.now(timezone.utc)
+    with _get_db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO scan_metadata (symbol, last_scan_time, scan_date) VALUES (?, ?, ?)",
+            (symbol, now.isoformat(), now.strftime("%Y-%m-%d")),
+        )
+    logger.info("[%s] Scan recorded at %s", symbol, now.isoformat())
+
+
+def get_last_scan_for_symbol(symbol: str) -> Optional[dict]:
+    """Return last scan info for symbol, or None."""
+    with _get_db() as conn:
+        row = conn.execute(
+            "SELECT last_scan_time, scan_date FROM scan_metadata WHERE symbol = ?",
+            (symbol,),
+        ).fetchone()
+        if row:
+            return {"last_scan_time": row["last_scan_time"], "scan_date": row["scan_date"]}
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Persistent watch trades — survive Docker restarts
+# ---------------------------------------------------------------------------
+def persist_watch(watch_id: str, symbol: str, watch_json: str, status: str = "watching"):
+    """Save or update a watch trade in the database."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _get_db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO watch_trades_persist (id, symbol, watch_json, status, created_at) VALUES (?, ?, ?, ?, ?)",
+            (watch_id, symbol, watch_json, status, now),
+        )
+    logger.info("[%s] Watch %s persisted (status=%s)", symbol, watch_id, status)
+
+
+def load_active_watches() -> list[dict]:
+    """Load all active watches from the database."""
+    with _get_db() as conn:
+        rows = conn.execute(
+            "SELECT watch_json FROM watch_trades_persist WHERE status = 'watching'"
+        ).fetchall()
+        return [{"watch_json": row["watch_json"]} for row in rows]
+
+
+def delete_watch(watch_id: str):
+    """Remove a watch from persistence after expiry/rejection/confirmation."""
+    with _get_db() as conn:
+        conn.execute("DELETE FROM watch_trades_persist WHERE id = ?", (watch_id,))
+    logger.debug("Watch %s removed from persistence", watch_id)
+
+
+def update_watch_status(watch_id: str, status: str):
+    """Update the status of a persisted watch."""
+    with _get_db() as conn:
+        conn.execute(
+            "UPDATE watch_trades_persist SET status = ? WHERE id = ?",
+            (status, watch_id),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Weekly performance report
+# ---------------------------------------------------------------------------
+def get_weekly_performance_report(symbol: Optional[str] = None) -> dict:
+    """Get detailed win rate breakdown for the last 7 days."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+
+    with _get_db() as conn:
+        where = "WHERE created_at >= ? AND status = 'closed'"
+        params: list = [cutoff]
+        if symbol:
+            where += " AND symbol = ?"
+            params.append(symbol)
+
+        rows = conn.execute(f"SELECT * FROM trades {where}", params).fetchall()
+
+    if not rows:
+        return {"total": 0, "message": "No closed trades in the last 7 days."}
+
+    trades = [dict(r) for r in rows]
+    total = len(trades)
+    wins = [t for t in trades if t["outcome"] in ("full_win", "partial_win")]
+    losses = [t for t in trades if t["outcome"] == "loss"]
+    total_pnl = sum(t.get("pnl_pips") or 0 for t in trades)
+
+    def _bucket_stats(key_fn):
+        buckets: dict[str, dict] = {}
+        for t in trades:
+            bucket = key_fn(t)
+            if not bucket:
+                continue
+            if bucket not in buckets:
+                buckets[bucket] = {"wins": 0, "total": 0, "pnl_pips": 0}
+            buckets[bucket]["total"] += 1
+            buckets[bucket]["pnl_pips"] += t.get("pnl_pips") or 0
+            if t["outcome"] in ("full_win", "partial_win"):
+                buckets[bucket]["wins"] += 1
+        # Calculate win rates
+        for b in buckets.values():
+            b["win_rate"] = (b["wins"] / b["total"] * 100) if b["total"] else 0
+        return buckets
+
+    def _checklist_bucket(t):
+        score_str = t.get("checklist_score", "")
+        if "/" not in score_str:
+            return None
+        try:
+            score = int(score_str.split("/")[0])
+        except ValueError:
+            return None
+        if score >= 10:
+            return "10-12"
+        elif score >= 7:
+            return "7-9"
+        elif score >= 4:
+            return "4-6"
+        else:
+            return "0-3"
+
+    return {
+        "total": total,
+        "wins": len(wins),
+        "losses": len(losses),
+        "win_rate": (len(wins) / total * 100) if total else 0,
+        "total_pnl_pips": total_pnl,
+        "by_checklist": _bucket_stats(_checklist_bucket),
+        "by_confidence": _bucket_stats(lambda t: t.get("confidence", "")),
+        "by_entry_status": _bucket_stats(lambda t: t.get("entry_status", "")),
+        "by_trend_alignment": _bucket_stats(lambda t: (t.get("trend_alignment", "") or "")[:3]),  # e.g., "4/4"
+        "by_price_zone": _bucket_stats(lambda t: t.get("price_zone", "")),
+        "by_bias": _bucket_stats(lambda t: t.get("bias", "")),
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -22,6 +22,7 @@ from pair_profiles import get_profile
 from trade_tracker import (
     log_trade_queued, get_stats, get_recent_trades, get_open_trades,
     get_daily_pnl, check_correlation_conflict, force_close_all_open_trades,
+    get_weekly_performance_report,
 )
 
 logger = logging.getLogger(__name__)
@@ -656,6 +657,7 @@ async def _cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Commands:\n"
         "/scan - Re-scan last pair or /scan GBPJPY\n"
         "/stats - Performance stats or /stats GBPJPY 7\n"
+        "/report - Weekly performance breakdown by pattern\n"
         "/drawdown - Daily P&L and risk status\n"
         "/news - Show upcoming high-impact news events\n"
         "/reset - Force-close stale trades in DB\n"
@@ -885,6 +887,138 @@ async def send_watch_expired(watch: WatchTrade):
         logger.error("Failed to send watch expired: %s", e)
 
 
+async def send_startup_notification():
+    """Send a notification when the server starts/restarts."""
+    if not _app:
+        return
+    chat_id = TELEGRAM_CHAT_ID
+    if not chat_id:
+        return
+    now = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    msg = (
+        "\U0001f504 Bot Restarted\n"
+        + "\u2501" * 20 + "\n"
+        + f"Server is online and ready at {now}.\n"
+        f"Use /status to check scan history."
+    )
+    try:
+        await _app.bot.send_message(chat_id=chat_id, text=msg)
+    except Exception as e:
+        logger.error("Failed to send startup notification: %s", e)
+
+
+async def send_missed_scan_alert(symbol: str, current_hour: int):
+    """Alert that today's scan has not happened yet (called on startup)."""
+    if not _app:
+        return
+    chat_id = TELEGRAM_CHAT_ID
+    if not chat_id:
+        return
+    msg = (
+        f"\u26a0\ufe0f {symbol} — Missed Scan Alert\n"
+        + "\u2501" * 20 + "\n"
+        + f"No scan recorded today. Current time: {current_hour}:00 MEZ.\n"
+        f"The bot may have restarted after the Kill Zone opened.\n\n"
+        f"Use /scan to trigger a manual scan (requires cached screenshots from MT5)."
+    )
+    try:
+        await _app.bot.send_message(chat_id=chat_id, text=msg)
+    except Exception as e:
+        logger.error("Failed to send missed scan alert: %s", e)
+
+
+async def send_scan_deadline_warning(symbol: str):
+    """Warn at 08:30 MEZ that no scan has happened yet."""
+    if not _app:
+        return
+    chat_id = TELEGRAM_CHAT_ID
+    if not chat_id:
+        return
+    msg = (
+        f"\u26a0\ufe0f {symbol} — Scan Deadline Warning\n"
+        + "\u2501" * 20 + "\n"
+        + "It is 08:30 MEZ and no analysis scan has arrived yet.\n"
+        "Check that the MT5 EA is running and connected."
+    )
+    try:
+        await _app.bot.send_message(chat_id=chat_id, text=msg)
+    except Exception as e:
+        logger.error("Failed to send scan deadline warning: %s", e)
+
+
+async def send_weekly_report():
+    """Send the weekly performance report automatically."""
+    if not _app:
+        return
+    chat_id = TELEGRAM_CHAT_ID
+    if not chat_id:
+        return
+
+    report = get_weekly_performance_report()
+    msg = _format_weekly_report(report)
+
+    try:
+        await _app.bot.send_message(chat_id=chat_id, text=msg)
+    except Exception as e:
+        logger.error("Failed to send weekly report: %s", e)
+
+
+def _format_weekly_report(report: dict) -> str:
+    """Format the weekly performance report for Telegram."""
+    if report.get("total", 0) == 0:
+        return "\U0001f4ca Weekly Report\n" + "\u2501" * 20 + "\nNo closed trades this week."
+
+    pnl_emoji = "\U0001f7e2" if report["total_pnl_pips"] >= 0 else "\U0001f534"
+    lines = [
+        "\U0001f4ca Weekly Performance Report",
+        "\u2501" * 25,
+        "",
+        f"Trades: {report['total']} | Wins: {report['wins']} | Losses: {report['losses']}",
+        f"\U0001f3af Win Rate: {report['win_rate']:.0f}%",
+        f"{pnl_emoji} P&L: {report['total_pnl_pips']:+.1f} pips",
+    ]
+
+    section_names = {
+        "by_checklist": "\U0001f4cb By Checklist Score",
+        "by_confidence": "\U0001f525 By Confidence",
+        "by_entry_status": "\U0001f4cd By Entry Status",
+        "by_trend_alignment": "\U0001f4c8 By Trend Alignment",
+        "by_price_zone": "\U0001f4ca By Price Zone",
+        "by_bias": "\U0001f4b1 By Bias",
+    }
+
+    for key, title in section_names.items():
+        data = report.get(key, {})
+        if not data:
+            continue
+        lines.append(f"\n{title}:")
+        for bucket, stats in sorted(data.items()):
+            if not bucket:
+                continue
+            lines.append(
+                f"  {bucket}: {stats['wins']}/{stats['total']}W "
+                f"({stats['win_rate']:.0f}%) | {stats['pnl_pips']:+.1f}p"
+            )
+
+    return "\n".join(lines)
+
+
+async def _cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /report command — weekly performance breakdown."""
+    chat_id = str(update.effective_chat.id)
+    if TELEGRAM_CHAT_ID and chat_id != TELEGRAM_CHAT_ID:
+        await update.message.reply_text("Unauthorized.")
+        return
+
+    symbol = None
+    if context.args:
+        symbol = context.args[0].upper()
+
+    report = get_weekly_performance_report(symbol=symbol)
+    msg = _format_weekly_report(report)
+    await update.message.reply_text(msg)
+
+
 def create_bot_app() -> Application:
     """Create and configure the Telegram bot application."""
     global _app
@@ -903,6 +1037,7 @@ def create_bot_app() -> Application:
     _app.add_handler(CommandHandler("reset", _cmd_reset))
     _app.add_handler(CommandHandler("status", _cmd_status))
     _app.add_handler(CommandHandler("help", _cmd_help))
+    _app.add_handler(CommandHandler("report", _cmd_report))
     _app.add_handler(CallbackQueryHandler(_handle_callback))
 
     logger.info("Telegram bot application created")

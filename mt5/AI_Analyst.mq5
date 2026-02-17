@@ -71,6 +71,7 @@ double   g_tradeTP1      = 0;   // TP1 level
 double   g_tradeTP2      = 0;   // TP2 level
 string   g_tradeBias     = "";  // "long" or "short"
 bool     g_tp1Hit        = false; // Whether TP1 has been hit (for break-even tracking)
+double   g_tp1ClosePct   = 50.0; // % of position to close at TP1 (from server)
 
 //--- Trade object
 CTrade g_trade;
@@ -1347,6 +1348,12 @@ void PollPendingTrade()
       return;
    }
 
+   //--- Parse adaptive TP1 close percentage (default 50% if not present)
+   double tp1ClosePct = JsonGetDouble(response, "tp1_close_pct");
+   if(tp1ClosePct <= 0 || tp1ClosePct > 100)
+      tp1ClosePct = 50.0;
+   g_tp1ClosePct = tp1ClosePct;
+
    //--- Execute the trade
    ExecuteTrade(tradeId, bias, entryMin, entryMax, stopLoss, tp1, tp2, slPips);
 }
@@ -1377,13 +1384,14 @@ void ExecuteTrade(string tradeId, string bias, double entryMin, double entryMax,
       return;
    }
 
-   //--- Split into two positions: 50% TP1, 50% TP2
+   //--- Split into two positions using server-calculated TP1 close %
    double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
    double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    double maxLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
 
-   double lotsTP1 = MathFloor((totalLots * 0.5) / lotStep) * lotStep;
-   double lotsTP2 = MathFloor((totalLots * 0.5) / lotStep) * lotStep;
+   double tp1Ratio = g_tp1ClosePct / 100.0;
+   double lotsTP1 = MathFloor((totalLots * tp1Ratio) / lotStep) * lotStep;
+   double lotsTP2 = MathFloor((totalLots * (1.0 - tp1Ratio)) / lotStep) * lotStep;
 
    if(lotsTP1 < minLot) lotsTP1 = minLot;
    if(lotsTP2 < minLot) lotsTP2 = minLot;
