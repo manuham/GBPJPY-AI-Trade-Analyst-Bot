@@ -13,19 +13,19 @@
 #include <Trade\Trade.mqh>
 
 //--- Input parameters
-input string   InpServerURL       = "http://127.0.0.1:8000/analyze"; // Server URL (analyze endpoint)
-input string   InpServerBase      = "http://127.0.0.1:8000";         // Server Base URL
+input string   InpServerURL       = "http://46.225.66.110:8000/analyze"; // Server URL (analyze endpoint)
+input string   InpServerBase      = "http://46.225.66.110:8000";         // Server Base URL
 input int      InpKillZoneStart   = 8;      // Kill Zone Start Hour (MEZ)
 input int      InpKillZoneStartMin= 0;      // Kill Zone Start Minute
 input int      InpKillZoneEnd     = 20;     // Kill Zone End Hour (MEZ) — watches expire here
-input int      InpTimezoneOffset  = 0;      // Timezone Offset (Server - MEZ) in hours
+input int      InpTimezoneOffset  = 1;      // Timezone Offset (Server - MEZ) in hours
 input int      InpCooldownMinutes = 30;     // Cooldown after scan (minutes)
 input int      InpScreenshotWidth = 2560;   // Screenshot Width
 input int      InpScreenshotHeight= 1440;   // Screenshot Height
 input bool     InpManualTrigger   = false;  // Manual Trigger (set true to force scan)
 input double   InpRiskPercent     = 1.0;    // Risk % per trade
 input int      InpMagicNumber     = 888888; // Magic Number for trades
-input int      InpConfirmCooldown = 60;     // Seconds between M1 confirmation attempts
+input int      InpConfirmCooldown = 300;     // Seconds between M1 confirmation attempts
 input string   InpMode            = "leader";  // Mode: "leader" (analyze+trade) or "follower" (trade only)
 input string   InpSymbolOverride  = "";        // Symbol override for server (e.g. "GBPJPY" when broker uses "GBPJPYm")
 input string   InpApiKey          = "";        // API Key for server authentication (must match server .env API_KEY)
@@ -1995,3 +1995,4 @@ void AppendFilePart(char &body[], string boundary, string fieldName, string file
    AppendBinaryToBody(body, fileData, fileSize);
 }
 //+------------------------------------------------------------------+
+
