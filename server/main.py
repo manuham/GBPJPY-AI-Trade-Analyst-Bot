@@ -347,6 +347,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# CORS — allow dashboard (Streamlit) to call API
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 # ---------------------------------------------------------------------------
 # API key authentication middleware

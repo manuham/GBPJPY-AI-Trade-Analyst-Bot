@@ -21,3 +21,23 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    container_name: dashboard
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    env_file:
+      - server/.env
+    volumes:
+      - ./data:/data
+    depends_on:
+      - ai-analyst
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
