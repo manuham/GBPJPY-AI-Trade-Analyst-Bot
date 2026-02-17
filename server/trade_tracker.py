@@ -130,21 +130,21 @@ def init_db():
                 conn.execute(migration)
             except sqlite3.OperationalError:
                 pass  # Column already exists
-    # --- scan_metadata table ---
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS scan_metadata (
-            symbol TEXT PRIMARY KEY,
-            last_scan_time TEXT,
-            scan_date TEXT
-        );
-        CREATE TABLE IF NOT EXISTS watch_trades_persist (
-            id TEXT PRIMARY KEY,
-            symbol TEXT NOT NULL,
-            watch_json TEXT NOT NULL,
-            status TEXT DEFAULT 'watching',
-            created_at TEXT
-        );
-    """)
+        # --- New tables for scan tracking & persistent watches ---
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS scan_metadata (
+                symbol TEXT PRIMARY KEY,
+                last_scan_time TEXT,
+                scan_date TEXT
+            );
+            CREATE TABLE IF NOT EXISTS watch_trades_persist (
+                id TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                watch_json TEXT NOT NULL,
+                status TEXT DEFAULT 'watching',
+                created_at TEXT
+            );
+        """)
     logger.info("Trade tracker database initialized at %s", DB_PATH)
 
 
