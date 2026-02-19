@@ -20,8 +20,8 @@ input int      InpKillZoneStartMin= 0;      // Kill Zone Start Minute
 input int      InpKillZoneEnd     = 20;     // Kill Zone End Hour (MEZ) — watches expire here
 input int      InpTimezoneOffset  = 1;      // Timezone Offset (Server - MEZ) in hours
 input int      InpCooldownMinutes = 30;     // Cooldown after scan (minutes)
-input int      InpScreenshotWidth = 2560;   // Screenshot Width
-input int      InpScreenshotHeight= 1440;   // Screenshot Height
+input int      InpScreenshotWidth = 1600;   // Screenshot Width (1600 optimal for AI vision)
+input int      InpScreenshotHeight= 900;    // Screenshot Height (900 optimal for AI vision)
 input bool     InpManualTrigger   = false;  // Manual Trigger (set true to force scan)
 input double   InpRiskPercent     = 1.0;    // Risk % per trade
 input int      InpMagicNumber     = 888888; // Magic Number for trades
@@ -1402,13 +1402,10 @@ string BuildMarketDataJSON(string session)
    json += "\"rsi_m5\":" + DoubleToString(GetRSI(PERIOD_M5, 14), 1) + ",";
 
    //--- Account balance
-   json += "\"account_balance\":" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + ",";
+   json += "\"account_balance\":" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2);
 
-   //--- OHLC data (D1=20 bars ~1 month, H4=30 bars ~5 days, H1=50 bars ~2 days, M5=60 bars ~5 hours)
-   json += "\"ohlc_d1\":" + GetOHLCArray(PERIOD_D1, 20) + ",";
-   json += "\"ohlc_h4\":" + GetOHLCArray(PERIOD_H4, 30) + ",";
-   json += "\"ohlc_h1\":" + GetOHLCArray(PERIOD_H1, 50) + ",";
-   json += "\"ohlc_m5\":" + GetOHLCArray(PERIOD_M5, 60);
+   // OHLC arrays removed — screenshots already contain candle data visually.
+   // Saves ~4,000 tokens per Opus call.
 
    json += "}";
    return json;

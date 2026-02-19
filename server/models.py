@@ -47,11 +47,14 @@ class MarketData(BaseModel):
     rsi_m5: float = 0.0
     # Account
     account_balance: float = 0.0
-    # OHLC bars (D1=20, H4=30, H1=100, M5=60)
+    # OHLC bars — deprecated for analysis (screenshots contain this visually).
+    # Kept for backward compat with older EAs and backtest endpoints.
     ohlc_d1: list[OHLCBar] = []
     ohlc_h4: list[OHLCBar] = []
     ohlc_h1: list[OHLCBar] = []
     ohlc_m5: list[OHLCBar] = []
+
+    model_config = {"extra": "ignore"}  # Ignore unknown fields from older/newer EAs
 
 
 class TradeSetup(BaseModel):

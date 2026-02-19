@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import logging
 import os
@@ -10,6 +11,7 @@ from datetime import date
 from typing import Optional
 
 import anthropic
+from PIL import Image
 
 from config import ANTHROPIC_API_KEY
 from models import AnalysisResult, MarketData, TradeSetup
@@ -104,6 +106,28 @@ def _encode_image(image_bytes: bytes) -> str:
     return base64.standard_b64encode(image_bytes).decode("utf-8")
 
 
+def _compress_image(png_bytes: bytes, quality: int = 85) -> tuple[bytes, str]:
+    """Convert PNG screenshot to compressed JPEG. Returns (bytes, media_type).
+
+    JPEG at quality 85 is ~60% smaller than PNG with negligible visual loss
+    for chart reading. Falls back to original PNG on error.
+    """
+    try:
+        img = Image.open(io.BytesIO(png_bytes))
+        if img.mode == "RGBA":
+            img = img.convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality, optimize=True)
+        compressed = buf.getvalue()
+        logger.debug("Image compressed: %d → %d bytes (%.0f%% reduction)",
+                      len(png_bytes), len(compressed),
+                      (1 - len(compressed) / len(png_bytes)) * 100 if png_bytes else 0)
+        return compressed, "image/jpeg"
+    except Exception as e:
+        logger.warning("Image compression failed, using original PNG: %s", e)
+        return png_bytes, "image/png"
+
+
 # ---------------------------------------------------------------------------
 # Prompt builders
 # ---------------------------------------------------------------------------
@@ -127,222 +151,79 @@ Use web search to check current {base} and {quote} drivers, breaking news, and t
     session_context = profile.get("session_context", "").format(symbol=symbol)
     session_rules = profile.get("session_rules", "").format(symbol=symbol)
 
-    return f"""You are a senior institutional FX analyst specializing in {symbol} during the {session_name} using ICT (Inner Circle Trader) methodology. You are analyzing live {symbol} charts from MetaTrader 5.
+    return f"""You are a senior institutional FX analyst specializing in {symbol} during the {session_name} using ICT methodology, analyzing live MT5 charts.
 
 ## CONTEXT
-- Pair: {symbol}
-- Session: **{session_name}** — the highest-probability window for {symbol}
-- Risk per trade: 1%
-- TP strategy: 50% closed at TP1, runner to TP2
-- Charts provided: **D1 (Daily)**, **H4 (4-Hour)**, **H1 (Hourly)**, **M5 (5-Minute)** — top-down
-- The charts include horizontal swing-level lines drawn by a custom indicator
-- Market data JSON includes: previous day H/L/C, weekly H/L, Asian session range, RSI(14), ATR(14) for all timeframes
-- **IMPORTANT**: Setups from this analysis will NOT be executed immediately. The EA will WATCH the entry zone and only enter when price reaches it AND an M1 confirmation shows a reaction. So propose setups even if price is not yet at the entry zone — the system will wait.
-
-## YOUR TASK
+- Pair: {symbol} | Session: {session_name} | Risk: 1% per trade | TP: 50% at TP1, runner to TP2
+- Charts: D1, H4, H1, M5 (top-down) with swing-level indicator lines
+- Market data JSON: PDH/PDL/PDC, weekly H/L, Asian range, RSI(14), ATR(14) per timeframe
+- Setups are NOT executed immediately — the EA watches the entry zone and confirms on M1 before entering. Propose setups even if price is not yet at the zone.
 
 {fundamentals_section}
 
-### Step 1 — MANDATORY: Daily Trend & Structure (D1 chart)
-Before ANYTHING, analyze the D1 (Daily) chart:
-- Identify the last 10-20 daily candles for swing structure
-- Are they making higher highs + higher lows (BULLISH) or lower highs + lower lows (BEARISH)?
-- Note the **previous day high/low/close** from the market data — these are KEY institutional reference levels
-- Note the **current week high/low** — price often targets these for liquidity sweeps
-- Check D1 RSI: >70 = overbought (caution for longs), <30 = oversold (caution for shorts), 40-60 = neutral
-- The D1 trend provides strategic context — all trades should ideally align with this.
+## ANALYSIS (strict top-down)
 
-### Step 1b — H4 Tactical Bias & OTE Zone (H4 chart)
-Analyze the H4 chart for tactical positioning within the D1 trend:
-- Identify H4 swing structure — does it align with D1 bias?
-- **Premium/Discount Zone**: Calculate the H4 range (recent swing high to swing low):
-  - DISCOUNT zone (below 50%) — favorable for longs
-  - PREMIUM zone (above 50%) — favorable for shorts
-- **OTE (Optimal Trade Entry) Zone**: Calculate 62-79% Fibonacci retracement of the last H4 impulse move:
-  - Optimal entry at the 70.5% level
-  - Entries within the 62-79% zone are high-probability
-  - Entries outside OTE need additional confluence to justify
-- **H4 Order Blocks**: Identify OBs on H4 — these are valid for max 8 candles (~32 hours)
-- Check H4 RSI for momentum confirmation
-- Set "h4_trend" to "bullish"/"bearish"/"ranging"
+### 1. D1 + H4 Strategic Bias
+**D1**: Identify swing structure (last 10-20 candles: HH/HL = bullish, LH/LL = bearish). Note PDH/PDL/PDC and weekly H/L as institutional reference levels. Check D1 RSI (>70 overbought, <30 oversold).
+**H4**: Does H4 align with D1? Calculate Premium/Discount zone (above/below 50% of H4 range). Find OTE zone (62-79% Fib of last H4 impulse, optimal at 70.5%). Identify H4 Order Blocks (valid ≤8 candles). Set d1_trend and h4_trend.
 
-### Step 2 — H1 Structure & Key Levels
-- Identify H1 swing structure within the context of D1 and H4 trends
-- **H1 Order Blocks**: Valid for max 30 candles (~30 hours)
-- Mark BOS (Break of Structure) and ChoCH (Change of Character) with exact prices
-- Check H1 RSI for confirmation
-
-### Step 3 — Session Levels & Liquidity
-Use the provided market data to identify key levels:
-- **Previous Day High (PDH)** and **Previous Day Low (PDL)** — institutional liquidity magnets
-- **Previous Day Close (PDC)** — acts as support/resistance pivot
-- **Asian Session Range** (asian_high/asian_low) — London often sweeps one side of the Asian range before reversing
-- **Weekly High/Low** — key swing liquidity targets
-- Mark which of these levels price is currently near or has recently swept
-
+### 2. H1 Structure + Session Levels
+- H1 swing structure, BOS/ChoCH with exact prices, OBs (valid ≤30 candles), RSI confirmation
+- Session levels from market data: PDH/PDL (liquidity magnets), PDC (pivot), Asian range (London sweep target), weekly H/L
 {session_context}
 
-### Step 4 — Multi-Timeframe Alignment (D1 → H4 → H1 → M5)
-- Market structure per timeframe: BOS, ChoCH locations with exact prices
-- Is M5 structure aligned with H1, H4, and D1, or showing early reversal signs?
-- Key swing highs/lows with exact price levels
-- Note any timeframe divergences
+### 3. M5 Entry Triggers + Multi-TF Alignment
+- MSS on M5: displacement candle body ≥15 pips breaking swing H/L
+- FVGs: M5 ≥15 pips, H1 ≥25 pips. Calculate CE (50% midpoint) as optimal entry
+- Liquidity sweeps: price exceeds key level ≥5 pips then reverses
+- OB validity: H4 ≤8 candles, H1 ≤30 candles. Untested = strongest, tested 3x+ = weakened
+- Note D1/H4/H1/M5 alignment vs divergences
+- Distinguish: where price BOUNCED FROM vs where price IS NOW
 
-### Step 5 — Key ICT Levels (be precise with prices)
-Apply these SPECIFIC criteria when identifying levels:
+### 4. Setup Generation
+**Criteria**: D1+H4 aligned preferred | Entry at CE of FVG within OB zone | Ideally within OTE (62-79%) | SL: 5-10 pips beyond OB extreme, **hard cap 70 pips** | Min R:R 1:1.2 (TP1), 1:2 (TP2) | ≥2 confluence factors | Clear invalidation
 
-**Order Blocks (OB):**
-- H4 OBs: valid for max 8 candles (~32 hours). Mark as stale if older.
-- H1 OBs: valid for max 30 candles (~30 hours). Mark as stale if older.
-- Specify if tested or untested — untested OBs are strongest
-- The displacement candle creating the OB must have a body ≥15 pips (MSS displacement)
+**Counter-trend**: Allowed only with BOS/ChoCH reversal on H1/M5. Mark counter_trend: true, max confidence "medium".
 
-**Fair Value Gaps (FVG):**
-- M5 FVGs: minimum 15 pips gap size to be significant
-- H1 FVGs: minimum 25 pips gap size to be significant
-- **Consequent Encroachment (CE)**: Calculate the 50% midpoint of each FVG — this is the OPTIMAL entry target
-- Specify if filled, partially filled, or open
+**For each setup, also provide:**
+- **trend_alignment**: "X/4 direction" (how many of D1/H4/H1/M5 agree, e.g. "3/4 bearish (M5 diverging)")
+- **entry_distance_pips** + **entry_status**: "at_zone" (<10p), "approaching" (10-40p), "requires_pullback" (>40p)
+- **negative_factors**: 1-3 honest risks (e.g. "D1 opposes", "RSI overbought", "OB stale", "SL near cap")
+- **checklist_score**: Score against 12-point ICT checklist:
+  1. D1 bias identified | 2. H4 aligns with D1 | 3. Correct Premium/Discount zone | 4. Active OB (within validity) | 5. MSS on M5 (≥15p displacement) | 6. FVG meets min size | 7. Entry at CE level | 8. Within OTE zone | 9. Liquidity sweep detected | 10. SL ≤70 pips | 11. R:R ≥1:2 on TP2 | 12. No news conflict within 30 min
+  Scoring: HIGH=10-12, MEDIUM-HIGH=8-9, MEDIUM=6-7, LOW=4-5. Below 4 = don't propose.
 
-**Market Structure Shift (MSS):**
-- Confirmed when a displacement candle (body ≥15 pips) breaks a swing high/low
-- This is the primary entry trigger on M5
+IMPORTANT: Quality over quantity. Only propose setups with genuine ICT confluence. An empty setups array on a flat day is better than forcing a weak setup. But the {session_name} usually offers at least one opportunity — don't give up too easily.
 
-**Liquidity:**
-- Institutional liquidity pools (equal highs/lows, stop clusters)
-- Liquidity sweep = price exceeds a key level by ≥5 pips then reverses
-- Breaker blocks, mitigation blocks where applicable
+### 5. No Trade
+Return empty setups ONLY if: spread widened (off-session/holiday), high-impact news within 30 min, or genuinely no tradeable structure.
 
-- Distinguish between: where price BOUNCED FROM vs where price IS NOW (these are different!)
-
-### Step 6 — Setup Generation
-Propose setups that satisfy these criteria:
-1. D1+H4 trend-aligned preferred. Counter-trend allowed only with BOS/ChoCH reversal on H1 or M5
-2. Entry at or near **CE level** (50% midpoint) of a valid FVG, within or near an active OB zone
-3. Entry ideally within the **OTE zone** (62-79% Fibonacci of last H4 impulse)
-4. **SL placement**: 5-10 pips beyond the Order Block extreme, with a **hard cap of 70 pips**
-5. Minimum 1:1.2 R:R on TP1, minimum 1:2 R:R on TP2
-6. At least 2 confluence factors
-7. Clear invalidation level
-
-For counter-trend setups:
-- Label them "counter_trend: true"
-- Show a ChoCH or BOS on H1 or M5 confirming the reversal
-- Rate confidence as "medium" at most
-
-Setups from equilibrium zone are acceptable if there is a clear directional trigger (BOS, FVG fill, session level sweep).
-
-IMPORTANT: Your goal is to find tradeable setups. Most sessions have at least one valid entry — look harder before saying "no trade". Even a cautious low-confidence setup with a clear SL is better than no setup.
-
-### Step 6b — Trend Alignment Score
-For each setup, assess D1/H4/H1/M5 trend direction and compute an alignment score:
-- Score = how many of D1/H4/H1/M5 agree with the trade bias (e.g., "4/4 bearish" if all bearish for a short)
-- Example: D1 bearish, H4 bearish, H1 bearish, M5 bullish → 3/4 bearish for a short → "3/4 bearish (M5 diverging)"
-- Include this as "trend_alignment" in the JSON output
-- Set "d1_trend", "h4_trend", "h1_trend" in the JSON output
-
-### Step 6c — Entry Distance & Status
-For each setup, calculate how far price currently is from the entry zone:
-- "entry_distance_pips": distance from current bid to entry zone midpoint, in pips
-- "entry_status": classify as:
-  - "at_zone" = price is within or very close to the entry zone (<10 pips)
-  - "approaching" = price is moving toward entry zone (10-40 pips away)
-  - "requires_pullback" = price needs to retrace significantly to reach entry (>40 pips)
-
-### Step 6d — Negative Factors
-For EVERY setup, identify 1-3 factors that work AGAINST the trade. Be honest — this helps the trader assess risk:
-- Examples: "D1 trend opposes trade", "RSI overbought", "Price far from entry zone", "Asian session — low volume",
-  "Near untested supply zone", "Wide spread", "H1 shows no clear BOS", "Counter-trend without strong reversal signal",
-  "Entry outside OTE zone", "FVG too small", "OB is stale (beyond validity)", "SL near 70 pip cap"
-- Include as "negative_factors" array in the JSON output
-
-### Step 6e — Level Validation
-Apply these rules when evaluating support/resistance levels:
-- A level that has been tested 3+ times is WEAKENED — more likely to break on the next test
-- Distinguish between: "untested" (fresh, strongest), "tested once" (confirmed), "tested 2x" (still valid), "tested 3x+" (weakened, likely to break)
-- A level being tested RIGHT NOW is not the same as a level price bounced from in the past
-- If your entry zone is at a weakened level (3+ tests), note this in negative_factors
-
-### Step 6f — ICT Entry Checklist
-For EVERY setup, score against this 12-point checklist:
-1. D1 bias identified (bullish/bearish/ranging)
-2. H4 bias aligns with D1
-3. Price in correct Premium/Discount zone for bias (longs in discount, shorts in premium)
-4. Active Order Block found (H4 or H1, within validity period: H4 ≤8 candles, H1 ≤30 candles)
-5. Market Structure Shift confirmed on M5 (displacement candle body ≥15 pips)
-6. Fair Value Gap present and meets minimum size (M5 ≥15 pips, H1 ≥25 pips)
-7. Entry at or near CE level (50% midpoint) of FVG
-8. Entry within OTE zone (62-79% Fibonacci of H4 impulse)
-9. Liquidity sweep detected (price exceeded key level ≥5 pips then reversed)
-10. SL within 70 pip cap
-11. R:R ≥1:2 on TP2
-12. No conflicting high-impact news within 30 minutes
-
-Report as "checklist_score": "X/12" in the JSON output.
-High confidence = 10-12/12, Medium-High = 8-9/12, Medium = 6-7/12, Low = 4-5/12. Below 4 = do not propose.
-
-### Step 7 — NO TRADE Decision
-Return an EMPTY setups array ONLY if:
-- Market is in a dead-flat range with zero structure (rare)
-- Spread is widened (off-session, holiday)
-- High-impact news within 30 minutes
-- You genuinely cannot identify ANY level to trade from
-
-## OUTPUT FORMAT
-Respond with ONLY valid JSON matching this structure:
+## OUTPUT — JSON ONLY
 {{
-  "setups": [
-    {{
-      "bias": "long" or "short",
-      "entry_min": price,
-      "entry_max": price,
-      "stop_loss": price,
-      "sl_pips": number,
-      "tp1": price,
-      "tp1_pips": number,
-      "tp2": price,
-      "tp2_pips": number,
-      "rr_tp1": number,
-      "rr_tp2": number,
-      "confluence": ["reason1", "reason2", "reason3"],
-      "invalidation": "description",
-      "timeframe_type": "scalp" or "intraday" or "swing",
-      "confidence": "high" or "medium_high" or "medium" or "low",
-      "news_warning": "description or null",
-      "counter_trend": true or false,
-      "h1_trend": "bullish" or "bearish" or "ranging",
-      "h4_trend": "bullish" or "bearish" or "ranging",
-      "d1_trend": "bullish" or "bearish" or "ranging",
-      "trend_alignment": "4/4 bearish" or "3/4 bullish (M5 diverging)" etc,
-      "price_zone": "premium" or "discount" or "equilibrium",
-      "entry_distance_pips": number (pips from current price to entry zone midpoint),
-      "entry_status": "at_zone" or "approaching" or "requires_pullback",
-      "negative_factors": ["factor1", "factor2"],
-      "checklist_score": "X/12"
-    }}
-  ],
-  "h1_trend_analysis": "2-3 sentences describing D1+H4+H1 swing structure and dominant trend",
-  "market_summary": "2-3 sentence summary including key session levels",
-  "primary_scenario": "description",
-  "alternative_scenario": "description",
+  "setups": [{{
+    "bias": "long"/"short", "entry_min": price, "entry_max": price,
+    "stop_loss": price, "sl_pips": N, "tp1": price, "tp1_pips": N,
+    "tp2": price, "tp2_pips": N, "rr_tp1": N, "rr_tp2": N,
+    "confluence": ["..."], "invalidation": "...",
+    "timeframe_type": "scalp"/"intraday"/"swing",
+    "confidence": "high"/"medium_high"/"medium"/"low",
+    "news_warning": "..." or null, "counter_trend": bool,
+    "h1_trend": "bullish"/"bearish"/"ranging",
+    "h4_trend": "bullish"/"bearish"/"ranging",
+    "d1_trend": "bullish"/"bearish"/"ranging",
+    "trend_alignment": "X/4 ...", "price_zone": "premium"/"discount"/"equilibrium",
+    "entry_distance_pips": N, "entry_status": "at_zone"/"approaching"/"requires_pullback",
+    "negative_factors": ["..."], "checklist_score": "X/12"
+  }}],
+  "h1_trend_analysis": "2-3 sentences on D1+H4+H1 structure",
+  "market_summary": "2-3 sentences with key session levels",
+  "primary_scenario": "...", "alternative_scenario": "...",
   "fundamental_bias": {profile['fundamental_bias_options']},
-  "upcoming_events": ["event1", "event2"]
+  "upcoming_events": ["..."]
 }}
 
-## RULES
-- Analyze D1 trend FIRST, then H4, then H1/M5 — strict top-down
-- Use the H4 chart to determine OTE zone and Premium/Discount — this is the tactical timeframe
-- Prefer trend-aligned trades (D1+H4 aligned), but counter-trend is allowed with reversal confirmation on H1/M5
-- Target CE level (50% midpoint of FVG) as optimal entry within OB zones
-- Apply OB validity limits: H4 ≤8 candles, H1 ≤30 candles — stale OBs are weak
-- Apply FVG minimums: M5 ≥15 pips, H1 ≥25 pips — smaller gaps are noise
-- SL hard cap: 70 pips maximum, placed 5-10 pips beyond OB extreme
-- Use session levels (PDH/PDL/PDC, Asian range, weekly H/L) as confluence and targets
-- Consider {symbol} spread (~{profile['typical_spread']}) in SL/TP calculations
-- Use RSI as confirmation, not as a standalone signal
-- Flag any setups near high-impact news events
-- {session_rules}
-- Prefer setups where entry is near current price or approaching (entry_status "at_zone" or "approaching") — these are more likely to trigger during the kill zone window.
-- Always respond with valid JSON, nothing else"""
+Consider {symbol} spread (~{profile['typical_spread']}). {session_rules}
+Prefer "at_zone"/"approaching" entries. Use RSI as confirmation only. Respond with valid JSON only."""
 
 
 def _build_screening_prompt(symbol: str, profile: dict, fundamentals: Optional[str] = None) -> str:
@@ -476,14 +357,24 @@ def _build_performance_feedback(symbol: str) -> Optional[str]:
             if b_trades:
                 _wr_line(bias_dir.upper(), b_trades)
 
-    # --- Section 3: Actionable instructions ---
+    # --- Section 3: Post-trade review insights ---
+    try:
+        from trade_tracker import get_recent_reviews
+        reviews = get_recent_reviews(symbol, limit=5)
+        if reviews:
+            lines.append("\n## Recent Post-Trade Insights")
+            for r in reviews:
+                lines.append(f"  - {r['review_text']}")
+    except Exception:
+        pass
+
+    # --- Section 4: Actionable instructions ---
     lines.append("\n## Instructions")
-    lines.append("Use the patterns above to improve your current analysis:")
+    lines.append("Use the patterns and insights above to improve your current analysis:")
     lines.append("- If a pattern consistently loses, AVOID it or rate confidence LOW")
     lines.append("- If a pattern consistently wins, actively LOOK FOR similar setups")
     lines.append("- If 'requires_pullback' entries lose often, prefer 'at_zone' entries")
     lines.append("- If counter-trend trades lose, only propose them with very strong reversal evidence")
-    lines.append("- Mention any relevant pattern insight in your market_summary")
 
     return "\n".join(lines)
 
@@ -498,7 +389,7 @@ def _build_image_content(
     screenshot_m5: bytes,
     market_data: MarketData,
 ) -> list[dict]:
-    """Build the full multi-modal user message content for Opus (all 4 charts + OHLC)."""
+    """Build the full multi-modal user message content for Opus (all 4 charts)."""
     content: list[dict] = []
 
     for label, img_bytes in [
@@ -509,43 +400,30 @@ def _build_image_content(
     ]:
         if not img_bytes:
             continue  # Skip if screenshot not available (backward compat)
+        compressed, media_type = _compress_image(img_bytes)
         content.append({"type": "text", "text": f"--- {label} Chart ---"})
         content.append(
             {
                 "type": "image",
                 "source": {
                     "type": "base64",
-                    "media_type": "image/png",
-                    "data": _encode_image(img_bytes),
+                    "media_type": media_type,
+                    "data": _encode_image(compressed),
                 },
             }
         )
 
+    # Strip OHLC arrays — screenshots already contain this data visually.
+    # Keeping only numeric indicators (RSI, ATR, session levels) saves ~4,000 tokens.
     market_dict = market_data.model_dump()
-    ohlc_summary = {
-        "d1_bars": len(market_dict.get("ohlc_d1", [])),
-        "h4_bars": len(market_dict.get("ohlc_h4", [])),
-        "h1_bars": len(market_dict.get("ohlc_h1", [])),
-        "m5_bars": len(market_dict.get("ohlc_m5", [])),
-    }
     display_data = {k: v for k, v in market_dict.items() if not k.startswith("ohlc_")}
-    display_data["ohlc_bar_counts"] = ohlc_summary
 
     content.append(
         {
             "type": "text",
             "text": (
-                "--- Market Data (includes session levels, RSI, ATR) ---\n"
+                "--- Market Data (session levels, RSI, ATR) ---\n"
                 + json.dumps(display_data, indent=2)
-                + "\n\n--- Full OHLC Data ---\n"
-                + json.dumps(
-                    {
-                        "ohlc_d1": market_dict.get("ohlc_d1", []),
-                        "ohlc_h4": market_dict.get("ohlc_h4", []),
-                        "ohlc_h1": market_dict.get("ohlc_h1", []),
-                        "ohlc_m5": market_dict.get("ohlc_m5", []),
-                    }
-                )
             ),
         }
     )
@@ -567,14 +445,15 @@ def _build_screening_content(
         ("H1 (Hourly)", screenshot_h1),
         ("M5 (5-Minute)", screenshot_m5),
     ]:
+        compressed, media_type = _compress_image(img_bytes)
         content.append({"type": "text", "text": f"--- {label} Chart ---"})
         content.append(
             {
                 "type": "image",
                 "source": {
                     "type": "base64",
-                    "media_type": "image/png",
-                    "data": _encode_image(img_bytes),
+                    "media_type": media_type,
+                    "data": _encode_image(compressed),
                 },
             }
         )
@@ -757,6 +636,12 @@ async def screen_charts(
             has_setup = parsed.get("has_setup", False)
             logger.info("[%s] Sonnet screening result: has_setup=%s — %s",
                         symbol, has_setup, parsed.get("reasoning", ""))
+            # Log screening result for analytics (Step 7)
+            try:
+                from trade_tracker import log_screening_result
+                log_screening_result(symbol, has_setup, parsed.get("reasoning", ""))
+            except Exception as log_err:
+                logger.warning("Failed to log screening result: %s", log_err)
             return parsed
 
         logger.warning("[%s] Sonnet screening: failed to parse, escalating to Opus", symbol)
@@ -821,15 +706,19 @@ async def analyze_charts_full(
         })
 
     # Extended thinking: let Opus reason internally before outputting JSON
-    # Improves setup quality and reduces false positives
-    thinking_config = {"type": "enabled", "budget_tokens": 10000}
+    # 6K budget is sufficient — typical analysis uses 4-5K thinking tokens
+    thinking_config = {"type": "enabled", "budget_tokens": 6000}
+
+    from config import ANALYSIS_MODEL
+    analysis_model = ANALYSIS_MODEL
 
     try:
-        logger.info("[%s] Opus full analysis (web_search=%s, thinking=10k, streaming)...", symbol, use_web_search)
+        logger.info("[%s] Full analysis (model=%s, web_search=%s, thinking=6k)...",
+                     symbol, analysis_model, use_web_search)
         # Streaming required for extended thinking with large max_tokens
         async with client.messages.stream(
-            model="claude-opus-4-20250514",
-            max_tokens=16000,
+            model=analysis_model,
+            max_tokens=8000,
             thinking=thinking_config,
             system=[
                 {
@@ -1005,14 +894,15 @@ When in doubt, say YES. The higher timeframe analysis supports this trade.
 Respond with ONLY this JSON:
 {{"confirmed": true or false, "reasoning": "1 sentence about the last 5 candles"}}"""
 
+    m1_compressed, m1_media = _compress_image(screenshot_m1)
     user_content = [
         {"type": "text", "text": f"--- M1 (1-Minute) Chart ---"},
         {
             "type": "image",
             "source": {
                 "type": "base64",
-                "media_type": "image/png",
-                "data": _encode_image(screenshot_m1),
+                "media_type": m1_media,
+                "data": _encode_image(m1_compressed),
             },
         },
         {
@@ -1060,3 +950,62 @@ Respond with ONLY this JSON:
     except Exception as e:
         logger.error("[%s] Haiku confirmation error: %s — defaulting to NO", symbol, e)
         return {"confirmed": False, "reasoning": f"Error: {e}"}
+
+
+# ---------------------------------------------------------------------------
+# Post-trade Haiku review — learning loop after each closed trade
+# ---------------------------------------------------------------------------
+async def post_trade_review(trade: dict, symbol: str) -> str:
+    """Quick Haiku review after a trade closes. Returns 2-3 sentence insight.
+
+    Cost: ~$0.01-0.02 per review (text only, no images).
+    These insights are stored and fed into future Opus prompts via performance feedback.
+    """
+    if not ANTHROPIC_API_KEY:
+        return ""
+
+    client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+
+    outcome = trade.get("outcome", "unknown")
+    bias = trade.get("bias", "unknown")
+    confidence = trade.get("confidence", "unknown")
+    checklist = trade.get("checklist_score", "?/12")
+    pnl_pips = trade.get("pnl_pips", 0)
+    sl_pips = trade.get("sl_pips", 0)
+    tp1_pips = trade.get("tp1_pips", 0)
+    tp2_pips = trade.get("tp2_pips", 0)
+    trend_align = trade.get("trend_alignment", "")
+    entry_status = trade.get("entry_status", "")
+    neg_factors = trade.get("negative_factors", "")
+    price_zone = trade.get("price_zone", "")
+
+    prompt = f"""You are reviewing a closed {symbol} trade for pattern learning. Be concise (2-3 sentences max).
+
+Trade details:
+- Bias: {bias} | Outcome: {outcome} | P&L: {pnl_pips:+.1f} pips
+- Confidence: {confidence} | Checklist: {checklist}
+- Trend alignment: {trend_align} | Price zone: {price_zone}
+- Entry status at signal: {entry_status}
+- Negative factors flagged: {neg_factors}
+- SL: {sl_pips:.0f} pips | TP1: {tp1_pips:.0f} pips | TP2: {tp2_pips:.0f} pips
+
+What's the key takeaway? Focus on what the system should learn for future {symbol} trades (e.g., "counter-trend setups with <8/12 checklist tend to lose", "at_zone entries outperform requires_pullback"). Be specific and actionable."""
+
+    try:
+        response = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        review_text = ""
+        for block in response.content:
+            if hasattr(block, "text") and block.text:
+                review_text += block.text
+
+        logger.info("[%s] Post-trade review for %s: %s", symbol, trade.get("id", "?"), review_text[:100])
+        return review_text.strip()
+
+    except Exception as e:
+        logger.error("[%s] Post-trade review error: %s", symbol, e)
+        return ""

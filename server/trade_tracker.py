@@ -145,6 +145,39 @@ def init_db():
                 created_at TEXT
             );
         """)
+    # --- Screening stats + post-trade reviews ---
+    conn2 = sqlite3.connect(DB_PATH, timeout=10)
+    conn2.executescript("""
+        CREATE TABLE IF NOT EXISTS screening_stats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT NOT NULL,
+            scan_date TEXT NOT NULL,
+            has_setup INTEGER NOT NULL,
+            reasoning TEXT DEFAULT '',
+            created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS post_trade_reviews (
+            trade_id TEXT PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            review_text TEXT NOT NULL,
+            created_at TEXT
+        );
+    """)
+    conn2.commit()
+    conn2.close()
+
+    # --- Additional migrations ---
+    with _get_db() as conn:
+        extra_migrations = [
+            "ALTER TABLE trades ADD COLUMN m1_confirmations_used INTEGER DEFAULT 0",
+            "ALTER TABLE trades ADD COLUMN analysis_model TEXT DEFAULT ''",
+        ]
+        for migration in extra_migrations:
+            try:
+                conn.execute(migration)
+            except sqlite3.OperationalError:
+                pass
+
     # --- Backtest tables ---
     try:
         from backtest import init_backtest_tables
@@ -554,9 +587,9 @@ def get_stats(
                 "pnl_money": sum(r["pnl_money"] or 0 for r in sym_closed),
             }
 
-        # Per-confidence breakdown
+        # Per-confidence breakdown (4 tiers)
         conf_stats = {}
-        for conf in ("high", "medium", "low"):
+        for conf in ("high", "medium_high", "medium", "low"):
             conf_closed = [r for r in closed if r["confidence"] == conf]
             conf_wins = [r for r in conf_closed if r["outcome"] in ("full_win", "partial_win")]
             conf_total = len(conf_closed)
@@ -803,3 +836,101 @@ def get_recent_closed_for_pair(symbol: str, limit: int = 10) -> list[dict]:
             (symbol, limit),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Screening stats — track Sonnet gate effectiveness
+# ---------------------------------------------------------------------------
+def log_screening_result(symbol: str, has_setup: bool, reasoning: str = ""):
+    """Log a Sonnet screening result for analytics."""
+    now = datetime.now(timezone.utc)
+    with _get_db() as conn:
+        conn.execute(
+            "INSERT INTO screening_stats (symbol, scan_date, has_setup, reasoning, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (symbol, now.strftime("%Y-%m-%d"), int(has_setup), reasoning, now.isoformat()),
+        )
+
+
+def get_screening_stats(days: int = 30) -> dict:
+    """Get Sonnet screening pass/fail stats."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    with _get_db() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) as total, SUM(has_setup) as passed "
+            "FROM screening_stats WHERE created_at >= ?",
+            (cutoff,),
+        ).fetchone()
+        total = row["total"] or 0
+        passed = row["passed"] or 0
+        return {
+            "total_scans": total,
+            "passed": passed,
+            "rejected": total - passed,
+            "pass_rate": (passed / total * 100) if total > 0 else 0,
+        }
+
+
+# ---------------------------------------------------------------------------
+# M1 confirmation tracking
+# ---------------------------------------------------------------------------
+def update_trade_confirmations(trade_id: str, count: int):
+    """Record how many M1 confirmation attempts a trade used."""
+    with _get_db() as conn:
+        conn.execute(
+            "UPDATE trades SET m1_confirmations_used = ? WHERE id = ?",
+            (count, trade_id),
+        )
+    logger.debug("Trade %s: M1 confirmations = %d", trade_id, count)
+
+
+def get_avg_m1_confirmations(days: int = 30) -> float:
+    """Get average M1 confirmation attempts for confirmed trades."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    with _get_db() as conn:
+        row = conn.execute(
+            "SELECT AVG(m1_confirmations_used) as avg_checks "
+            "FROM trades WHERE created_at >= ? AND m1_confirmations_used > 0 "
+            "AND status IN ('executed', 'closed')",
+            (cutoff,),
+        ).fetchone()
+        return round(row["avg_checks"] or 0, 1)
+
+
+# ---------------------------------------------------------------------------
+# Post-trade reviews
+# ---------------------------------------------------------------------------
+def store_post_trade_review(trade_id: str, symbol: str, review_text: str):
+    """Store a Haiku post-trade review."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _get_db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO post_trade_reviews (trade_id, symbol, review_text, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (trade_id, symbol, review_text, now),
+        )
+    logger.info("[%s] Post-trade review stored for %s", symbol, trade_id)
+
+
+def get_recent_reviews(symbol: str, limit: int = 5) -> list[dict]:
+    """Get recent post-trade review insights for a pair."""
+    with _get_db() as conn:
+        rows = conn.execute(
+            "SELECT trade_id, review_text, created_at "
+            "FROM post_trade_reviews WHERE symbol = ? "
+            "ORDER BY created_at DESC LIMIT ?",
+            (symbol, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Analysis model tracking
+# ---------------------------------------------------------------------------
+def update_trade_model(trade_id: str, model: str):
+    """Record which Claude model was used for analysis."""
+    with _get_db() as conn:
+        conn.execute(
+            "UPDATE trades SET analysis_model = ? WHERE id = ?",
+            (model, trade_id),
+        )

@@ -658,6 +658,21 @@ async def _cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"({t.get('confidence', '?')}) {pnl:+.0f}p — {date_str}"
             )
 
+    # Screening stats (Sonnet gate effectiveness)
+    try:
+        from trade_tracker import get_screening_stats, get_avg_m1_confirmations
+        screen = get_screening_stats(days=days)
+        if screen["total_scans"] > 0:
+            lines += [
+                "",
+                f"\U0001f50d Screening: {screen['passed']}/{screen['total_scans']} passed ({screen['pass_rate']:.0f}%)",
+            ]
+        avg_m1 = get_avg_m1_confirmations(days=days)
+        if avg_m1 > 0:
+            lines.append(f"\U0001f4cd Avg M1 checks: {avg_m1}/trade")
+    except Exception:
+        pass
+
     lines += ["", f"Usage: /stats [SYMBOL] [DAYS]"]
 
     await update.message.reply_text("\n".join(lines))
@@ -996,6 +1011,27 @@ async def send_confirmation_result(watch: WatchTrade, confirmed: bool, reasoning
         await _app.bot.send_message(chat_id=chat_id, text=msg, reply_markup=keyboard)
     except Exception as e:
         logger.error("Failed to send confirmation result: %s", e)
+
+
+async def send_post_trade_insight(symbol: str, trade_id: str, review: str):
+    """Send a post-trade Haiku review insight via Telegram."""
+    if not _app:
+        return
+    chat_id = TELEGRAM_CHAT_ID
+    if not chat_id:
+        return
+
+    msg = (
+        f"\U0001f4a1 {symbol} Post-Trade Insight\n"
+        + "\u2501" * 20 + "\n"
+        + f"\U0001f194 Trade: {trade_id}\n"
+        f"\U0001f4ac {review}"
+    )
+
+    try:
+        await _app.bot.send_message(chat_id=chat_id, text=msg)
+    except Exception as e:
+        logger.error("Failed to send post-trade insight: %s", e)
 
 
 async def send_watch_expired(watch: WatchTrade):

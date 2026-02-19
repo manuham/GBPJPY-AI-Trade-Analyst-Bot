@@ -180,11 +180,13 @@ def _create_watch_trade(symbol: str, setup) -> WatchTrade:
     # Adaptive TP1 close %: high confidence → let more ride, low → take profit early
     checklist_num = _parse_checklist_score(setup.checklist_score)
     if checklist_num >= 10:
-        tp1_pct = 40.0  # High confidence: close less at TP1, let 60% ride to TP2
-    elif checklist_num >= 7:
-        tp1_pct = 50.0  # Medium: balanced 50/50
+        tp1_pct = 40.0  # HIGH (10-12): close less at TP1, let 60% ride to TP2
+    elif checklist_num >= 8:
+        tp1_pct = 45.0  # MEDIUM_HIGH (8-9): slightly more rides to TP2
+    elif checklist_num >= 6:
+        tp1_pct = 55.0  # MEDIUM (6-7): balanced
     else:
-        tp1_pct = 60.0  # Lower confidence: take more profit at TP1
+        tp1_pct = 60.0  # LOW (4-5): take more profit at TP1
 
     return WatchTrade(
         id=uuid.uuid4().hex[:8],
@@ -661,6 +663,13 @@ async def confirm_entry_endpoint(
         except Exception as e:
             logger.error("[%s] Failed to log confirmed trade: %s", symbol, e)
 
+        # Track M1 confirmation attempts (Step 8)
+        try:
+            from trade_tracker import update_trade_confirmations
+            update_trade_confirmations(watch.id, watch.confirmations_used)
+        except Exception as e:
+            logger.error("[%s] Failed to log M1 confirmations: %s", symbol, e)
+
         logger.info("[%s] M1 CONFIRMED — trade %s queued for execution", symbol, watch.id)
         return {"confirmed": True, "reasoning": reasoning, "remaining_checks": remaining}
     else:
@@ -765,6 +774,23 @@ async def trade_closed(report: TradeCloseReport):
             public_msg = format_public_trade_alert(trade, event=event)
             await post_to_public_channel(public_msg)
             update_trade_in_sheets(trade)
+
+            # --- Post-trade Haiku review (learning loop) ---
+            if trade.get("outcome") in ("full_win", "partial_win", "loss"):
+                try:
+                    from analyzer import post_trade_review
+                    from trade_tracker import store_post_trade_review
+                    review = await post_trade_review(trade, report.symbol or "UNKNOWN")
+                    if review:
+                        store_post_trade_review(report.trade_id, report.symbol or "UNKNOWN", review)
+                        # Send review with close notification (if not already sent)
+                        try:
+                            from telegram_bot import send_post_trade_insight
+                            await send_post_trade_insight(report.symbol or "UNKNOWN", report.trade_id, review)
+                        except Exception:
+                            pass  # send_post_trade_insight may not exist yet
+                except Exception as e:
+                    logger.error("[%s] Post-trade review error: %s", report.symbol, e)
     except Exception as e:
         logger.error("[%s] Public feed error on trade close: %s", report.symbol, e)
 

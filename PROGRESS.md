@@ -1,7 +1,7 @@
 # PROGRESS TRACKER — GBPJPY AI Trade Analyst Bot
 
-**Last updated:** 2026-02-17 (end of session)
-**Current phase:** Phase 4 COMPLETE — Phase 5 (Community & Education) UP NEXT
+**Last updated:** 2026-02-17
+**Current phase:** Phase 5 IN PROGRESS — Website landing page built, needs commit + Vercel deploy
 **Reference:** See `Scaling_Roadmap.docx` for full 5-phase business plan
 
 ---
@@ -174,30 +174,57 @@ GSHEETS_CREDENTIALS_FILE=/data/gsheets_credentials.json
 
 ---
 
-## Phase 5: Community & Education — NOT STARTED (UP NEXT)
+## Phase 5: Community & Education — WEBSITE BUILT (landing page complete)
 
-**Roadmap deliverables (from Scaling_Roadmap.docx):**
+### Website (Next.js Landing Page) — BUILT
 
-1. **Discord server** — structured channels:
-   - #announcements, #daily-analysis, #ict-education
-   - #setup-breakdowns, #trade-journal, #voice-sessions, #leaderboard
+**Stack:** Next.js 15, React 19, Tailwind CSS v4, SWR, TypeScript
+**Location:** `/website/` directory
 
-2. **Subscription tiers:**
-   - Free ($0): delayed signals, public P&L, weekly report
-   - Starter ($29/mo): real-time signals (1 pair), Telegram, basic dashboard
-   - Pro ($79/mo): all pairs, Discord, full dashboard, trade journal
-   - Enterprise ($199/mo): API access, copy trading, custom settings
+**Files created:**
+| File | Purpose |
+|------|---------|
+| `package.json` | Dependencies: next 15, react 19, swr, tailwindcss v4 |
+| `tsconfig.json` | TypeScript config with path aliases |
+| `postcss.config.mjs` | PostCSS with @tailwindcss/postcss |
+| `next.config.ts` | Minimal Next.js config |
+| `.gitignore` | node_modules, .next, data/ |
+| `lib/api.ts` | API URL config, TypeScript interfaces, fetch helpers |
+| `app/globals.css` | Tailwind import + dark theme CSS variables |
+| `app/layout.tsx` | Root layout with SEO/OpenGraph metadata |
+| `app/page.tsx` | Main landing page composing all sections |
+| `app/components/Hero.tsx` | Gradient background, headline, CTA buttons |
+| `app/components/LiveStats.tsx` | Async server component — fetches /public/stats, 4 stat cards |
+| `app/components/HowItWorks.tsx` | 3-step visual: AI Analysis → ICT Checklist → Smart Entry |
+| `app/components/TradeTable.tsx` | Client component with SWR polling /public/trades every 30s |
+| `app/components/Pricing.tsx` | 4 tier cards (Free/Starter/Pro/Enterprise) |
+| `app/components/WaitlistForm.tsx` | Email form, posts to /api/waitlist |
+| `app/components/Footer.tsx` | Links, disclaimer, copyright |
+| `app/api/waitlist/route.ts` | Waitlist API — saves emails to data/waitlist.json |
 
-3. **Content calendar:**
-   - Daily (auto): morning analysis + evening recap
-   - Wednesday: ICT concept deep dive
-   - Friday: weekly setup breakdown
-   - Sunday 19:00: performance report (already auto-generated)
-   - Monthly: live voice session Q&A
+**TypeScript:** Compiles clean, zero errors
 
-4. **Website/landing page:**
-   - Professional landing page with pricing, public track record, signup
-   - Technology: Next.js + React + Tailwind (from Phase 2 roadmap)
+**API connection:** Reads from `NEXT_PUBLIC_API_URL` env var (default: http://46.225.66.110:8000)
+- LiveStats fetches `/public/stats` (server component, revalidates every 60s)
+- TradeTable fetches `/public/trades` (client component, SWR polls every 30s)
+
+### To deploy (Vercel):
+```
+1. Push code to GitHub (commit the website/ folder)
+2. Go to vercel.com → New Project → Import from GitHub
+3. Set Root Directory to "website"
+4. Add env var: NEXT_PUBLIC_API_URL = http://46.225.66.110:8000
+5. Deploy
+```
+
+### Still TODO for Phase 5:
+- Commit and push website code to GitHub
+- Deploy to Vercel
+- Buy domain name (e.g., aitradeanalyst.com)
+- Connect domain in Vercel settings
+- Discord server setup
+- Content calendar automation
+- Myfxbook MT5 connection (account created but not connected yet)
 
 **Revenue target:** $35,000 - $50,000 Year 1
 
@@ -228,6 +255,16 @@ GSHEETS_CREDENTIALS_FILE=/data/gsheets_credentials.json
 | File | Purpose | Phase |
 |------|---------|-------|
 | `app.py` | Streamlit web dashboard (6 pages) | Phase 2 |
+
+### Website (`/website/`)
+| File | Purpose | Phase |
+|------|---------|-------|
+| `app/page.tsx` | Main landing page composing all sections | Phase 5 |
+| `app/layout.tsx` | Root layout with SEO metadata | Phase 5 |
+| `app/globals.css` | Tailwind + dark theme CSS variables | Phase 5 |
+| `app/components/*.tsx` | Hero, LiveStats, HowItWorks, TradeTable, Pricing, WaitlistForm, Footer | Phase 5 |
+| `app/api/waitlist/route.ts` | Waitlist email collection API | Phase 5 |
+| `lib/api.ts` | API helpers + TypeScript interfaces | Phase 5 |
 
 ### MT5 (`/mt5/`)
 | File | Purpose |

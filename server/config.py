@@ -23,3 +23,7 @@ API_KEY: str = os.getenv("API_KEY", "")
 ACTIVE_PAIRS: list[str] = [
     p.strip() for p in os.getenv("ACTIVE_PAIRS", "GBPJPY").split(",") if p.strip()
 ]
+
+# Analysis model — switch between Opus and Sonnet 4.5 for A/B testing
+# Default: Opus. Set to "claude-sonnet-4-5-20250929" to test with Sonnet.
+ANALYSIS_MODEL: str = os.getenv("ANALYSIS_MODEL", "claude-opus-4-20250514")
