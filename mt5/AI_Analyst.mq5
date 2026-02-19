@@ -898,10 +898,23 @@ void DrawEntryZone()
 {
    if(!g_hasWatch || g_watchTradeId == "") return;
 
-   //--- Time coordinates: 50 H1-bars back, 20 forward from current
-   datetime timeStart = iTime(_Symbol, PERIOD_H1, 50);
-   datetime timeEnd   = iTime(_Symbol, PERIOD_H1, 0) + 20 * PeriodSeconds(PERIOD_H1);
-   datetime timeLbl   = iTime(_Symbol, PERIOD_H1, 10);  // Label position
+   //--- Use the chart's own timeframe for time coordinates (avoids 0 when higher TF data not loaded)
+   ENUM_TIMEFRAMES chartTF = ChartPeriod(0);
+   int barsBack    = 50;    // How far left the zone extends
+   int barsForward = 30;    // How far right the zone extends
+   int barsLabel   = 5;     // Where the label sits
+
+   datetime timeStart = iTime(_Symbol, chartTF, barsBack);
+   datetime timeEnd   = iTime(_Symbol, chartTF, 0) + barsForward * PeriodSeconds(chartTF);
+   datetime timeLbl   = iTime(_Symbol, chartTF, barsLabel);
+
+   //--- Safety: if iTime returned 0 (data not loaded), fall back to TimeCurrent arithmetic
+   if(timeStart == 0 || timeEnd == 0)
+   {
+      timeStart = TimeCurrent() - barsBack * PeriodSeconds(chartTF);
+      timeEnd   = TimeCurrent() + barsForward * PeriodSeconds(chartTF);
+      timeLbl   = TimeCurrent() - barsLabel * PeriodSeconds(chartTF);
+   }
 
    //--- Determine colors based on bias
    color zoneColor, zoneBorder;
@@ -916,14 +929,25 @@ void DrawEntryZone()
       zoneBorder  = C'220,50,50';
    }
 
-   //--- Entry zone rectangle (semi-transparent, behind candles)
+   //--- Entry zone rectangle (filled, drawn behind candles)
    ObjectDelete(0, "AI_Zone");
-   ObjectCreate(0, "AI_Zone", OBJ_RECTANGLE, 0, timeStart, g_watchZoneMin, timeEnd, g_watchZoneMax);
+   if(!ObjectCreate(0, "AI_Zone", OBJ_RECTANGLE, 0, timeStart, g_watchZoneMin, timeEnd, g_watchZoneMax))
+      Print("WARNING: Failed to create AI_Zone (error ", GetLastError(), ")");
    ObjectSetInteger(0, "AI_Zone", OBJPROP_COLOR, zoneColor);
    ObjectSetInteger(0, "AI_Zone", OBJPROP_FILL, true);
    ObjectSetInteger(0, "AI_Zone", OBJPROP_BACK, true);
    ObjectSetInteger(0, "AI_Zone", OBJPROP_SELECTABLE, false);
    ObjectSetInteger(0, "AI_Zone", OBJPROP_HIDDEN, true);
+
+   //--- Zone border rectangle (unfilled outline in front of candles for visibility)
+   ObjectDelete(0, "AI_ZoneBorder");
+   ObjectCreate(0, "AI_ZoneBorder", OBJ_RECTANGLE, 0, timeStart, g_watchZoneMin, timeEnd, g_watchZoneMax);
+   ObjectSetInteger(0, "AI_ZoneBorder", OBJPROP_COLOR, zoneBorder);
+   ObjectSetInteger(0, "AI_ZoneBorder", OBJPROP_FILL, false);
+   ObjectSetInteger(0, "AI_ZoneBorder", OBJPROP_BACK, false);
+   ObjectSetInteger(0, "AI_ZoneBorder", OBJPROP_WIDTH, 2);
+   ObjectSetInteger(0, "AI_ZoneBorder", OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, "AI_ZoneBorder", OBJPROP_HIDDEN, true);
 
    //--- Zone label text: "SHORT | 8/12 | HIGH | R:R 1:2.5"
    string biasStr = (g_watchBias == "long") ? "LONG" : "SHORT";
@@ -950,14 +974,14 @@ void DrawEntryZone()
    //--- Entry midpoint for pip calculations
    double entryMid = (g_watchZoneMin + g_watchZoneMax) / 2.0;
 
-   //--- SL line (red dashed, width 2)
+   //--- SL line (red dashed, width 2, in front of candles)
    double slPips = MathAbs(g_watchSL - entryMid) / g_pipSize;
    ObjectDelete(0, "AI_LineSL");
    ObjectCreate(0, "AI_LineSL", OBJ_HLINE, 0, 0, g_watchSL);
    ObjectSetInteger(0, "AI_LineSL", OBJPROP_COLOR, clrRed);
    ObjectSetInteger(0, "AI_LineSL", OBJPROP_STYLE, STYLE_DASH);
-   ObjectSetInteger(0, "AI_LineSL", OBJPROP_WIDTH, 1);
-   ObjectSetInteger(0, "AI_LineSL", OBJPROP_BACK, true);
+   ObjectSetInteger(0, "AI_LineSL", OBJPROP_WIDTH, 2);
+   ObjectSetInteger(0, "AI_LineSL", OBJPROP_BACK, false);
    ObjectSetInteger(0, "AI_LineSL", OBJPROP_SELECTABLE, false);
    ObjectSetInteger(0, "AI_LineSL", OBJPROP_HIDDEN, true);
 
@@ -972,14 +996,14 @@ void DrawEntryZone()
    ObjectSetInteger(0, "AI_LblSL", OBJPROP_SELECTABLE, false);
    ObjectSetInteger(0, "AI_LblSL", OBJPROP_HIDDEN, true);
 
-   //--- TP1 line (green dashed, width 1)
+   //--- TP1 line (green dashed, width 2, in front of candles)
    double tp1Pips = MathAbs(g_watchTP1 - entryMid) / g_pipSize;
    ObjectDelete(0, "AI_LineTP1");
    ObjectCreate(0, "AI_LineTP1", OBJ_HLINE, 0, 0, g_watchTP1);
    ObjectSetInteger(0, "AI_LineTP1", OBJPROP_COLOR, clrLimeGreen);
    ObjectSetInteger(0, "AI_LineTP1", OBJPROP_STYLE, STYLE_DASH);
-   ObjectSetInteger(0, "AI_LineTP1", OBJPROP_WIDTH, 1);
-   ObjectSetInteger(0, "AI_LineTP1", OBJPROP_BACK, true);
+   ObjectSetInteger(0, "AI_LineTP1", OBJPROP_WIDTH, 2);
+   ObjectSetInteger(0, "AI_LineTP1", OBJPROP_BACK, false);
    ObjectSetInteger(0, "AI_LineTP1", OBJPROP_SELECTABLE, false);
    ObjectSetInteger(0, "AI_LineTP1", OBJPROP_HIDDEN, true);
 
@@ -994,14 +1018,14 @@ void DrawEntryZone()
    ObjectSetInteger(0, "AI_LblTP1", OBJPROP_SELECTABLE, false);
    ObjectSetInteger(0, "AI_LblTP1", OBJPROP_HIDDEN, true);
 
-   //--- TP2 line (green solid, width 2)
+   //--- TP2 line (green solid, width 2, in front of candles)
    double tp2Pips = MathAbs(g_watchTP2 - entryMid) / g_pipSize;
    ObjectDelete(0, "AI_LineTP2");
    ObjectCreate(0, "AI_LineTP2", OBJ_HLINE, 0, 0, g_watchTP2);
    ObjectSetInteger(0, "AI_LineTP2", OBJPROP_COLOR, clrGreen);
    ObjectSetInteger(0, "AI_LineTP2", OBJPROP_STYLE, STYLE_SOLID);
    ObjectSetInteger(0, "AI_LineTP2", OBJPROP_WIDTH, 2);
-   ObjectSetInteger(0, "AI_LineTP2", OBJPROP_BACK, true);
+   ObjectSetInteger(0, "AI_LineTP2", OBJPROP_BACK, false);
    ObjectSetInteger(0, "AI_LineTP2", OBJPROP_SELECTABLE, false);
    ObjectSetInteger(0, "AI_LineTP2", OBJPROP_HIDDEN, true);
 
@@ -1093,11 +1117,18 @@ void DrawInfoPanel()
    CreatePanelLabel("AI_PanelScore", textX, curY, "Checklist:  " + g_watchChecklistScore, "Arial", 9, scoreClr);
    curY += lineH;
 
-   //--- Confidence
+   //--- Confidence (4 tiers: HIGH, MEDIUM_HIGH, MEDIUM, LOW)
    color confClr = clrLimeGreen;
-   if(g_watchConfidence == "LOW") confClr = clrOrangeRed;
-   else if(g_watchConfidence == "MEDIUM") confClr = clrOrange;
-   CreatePanelLabel("AI_PanelConf", textX, curY, "Confidence:  " + g_watchConfidence, "Arial", 9, confClr);
+   string confDisplay = g_watchConfidence;
+   if(g_watchConfidence == "low" || g_watchConfidence == "LOW")
+   {  confClr = clrOrangeRed; confDisplay = "LOW"; }
+   else if(g_watchConfidence == "medium" || g_watchConfidence == "MEDIUM")
+   {  confClr = clrOrange; confDisplay = "MEDIUM"; }
+   else if(g_watchConfidence == "medium_high" || g_watchConfidence == "MEDIUM_HIGH")
+   {  confClr = clrYellow; confDisplay = "MED-HIGH"; }
+   else
+   {  confClr = clrLimeGreen; confDisplay = "HIGH"; }
+   CreatePanelLabel("AI_PanelConf", textX, curY, "Confidence:  " + confDisplay, "Arial", 9, confClr);
    curY += lineH;
 
    //--- R:R Ratio

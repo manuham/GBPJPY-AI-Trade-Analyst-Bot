@@ -278,7 +278,7 @@ For EVERY setup, score against this 12-point checklist:
 12. No conflicting high-impact news within 30 minutes
 
 Report as "checklist_score": "X/12" in the JSON output.
-High confidence = 10-12/12, Medium = 7-9/12, Low = 4-6/12. Below 4 = do not propose.
+High confidence = 10-12/12, Medium-High = 8-9/12, Medium = 6-7/12, Low = 4-5/12. Below 4 = do not propose.
 
 ### Step 7 — NO TRADE Decision
 Return an EMPTY setups array ONLY if:
@@ -306,7 +306,7 @@ Respond with ONLY valid JSON matching this structure:
       "confluence": ["reason1", "reason2", "reason3"],
       "invalidation": "description",
       "timeframe_type": "scalp" or "intraday" or "swing",
-      "confidence": "high" or "medium" or "low",
+      "confidence": "high" or "medium_high" or "medium" or "low",
       "news_warning": "description or null",
       "counter_trend": true or false,
       "h1_trend": "bullish" or "bearish" or "ranging",
@@ -452,11 +452,11 @@ def _build_performance_feedback(symbol: str) -> Optional[str]:
             if aligned:
                 _wr_line(f"{prefix} aligned", aligned)
 
-        # By confidence
-        for conf in ("high", "medium", "low"):
+        # By confidence (4 tiers)
+        for conf in ("high", "medium_high", "medium", "low"):
             conf_trades = [t for t in trades if t.get("confidence") == conf]
             if conf_trades:
-                _wr_line(f"{conf.upper()} confidence", conf_trades)
+                _wr_line(f"{conf.upper().replace('_', '-')} confidence", conf_trades)
 
         # By entry status
         for status in ("at_zone", "approaching", "requires_pullback"):
@@ -985,23 +985,25 @@ async def confirm_entry(
 
     system_prompt = f"""You are a fast M1 price-action reader for {symbol}. Your ONLY job is to check if there is a {direction} reaction forming on the M1 chart right now.
 
-Look at the LAST 10-15 M1 candles and answer YES or NO.
+CRITICAL: Focus ONLY on the LAST 5 candles (the rightmost candles on the chart). Ignore everything else — the higher timeframe analysis has already been done and confirmed this is a valid setup. You are just checking for a basic reaction at the zone.
 
-Signs of a {direction} reaction (need at least 1):
-- Rejection wick(s) off {'support' if bias == 'long' else 'resistance'} (long wick, small body)
-- {'Bullish' if bias == 'long' else 'Bearish'} engulfing candle
-- M1 Break of Structure (BOS) {'upward' if bias == 'long' else 'downward'}
-- {'Bullish' if bias == 'long' else 'Bearish'} FVG forming
-- Strong {'buying' if bias == 'long' else 'selling'} pressure (consecutive {direction} candles with increasing body size)
+The setup has ALREADY been validated on D1, H4, H1, and M5 with a high ICT checklist score. Your job is simply to confirm price is not slicing straight through the zone. Even a SMALL reaction is enough.
 
-Signs to REJECT (say NO):
-- Price slicing through the zone without pausing ({opposite} momentum)
-- No visible reaction — candles just passing through
-- {'Bearish' if bias == 'long' else 'Bullish'} engulfing at the zone (wrong direction)
-- Wicks on the wrong side (no rejection)
+Say YES (confirmed: true) if you see ANY of these in the last 5 candles:
+- Any wick rejection off {'support' if bias == 'long' else 'resistance'} (even a small one)
+- A {'bullish' if bias == 'long' else 'bearish'} candle after {'bearish' if bias == 'long' else 'bullish'} ones (reversal attempt)
+- Price slowing down or stalling at the zone (small-body candles, dojis)
+- Any {'bullish' if bias == 'long' else 'bearish'} engulfing or FVG
+- Price simply sitting in or near the entry zone without aggressive {opposite} momentum
+
+Say NO (confirmed: false) ONLY if:
+- Price is clearly slicing through the zone with strong {opposite} momentum (large-body {opposite} candles with no wicks)
+- The last 5 candles show zero hesitation — pure one-directional {opposite} movement through the zone
+
+When in doubt, say YES. The higher timeframe analysis supports this trade.
 
 Respond with ONLY this JSON:
-{{"confirmed": true or false, "reasoning": "1 sentence explaining what you see on M1"}}"""
+{{"confirmed": true or false, "reasoning": "1 sentence about the last 5 candles"}}"""
 
     user_content = [
         {"type": "text", "text": f"--- M1 (1-Minute) Chart ---"},

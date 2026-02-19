@@ -104,6 +104,7 @@ def _format_setup_message(setup: TradeSetup, summary: str, symbol: str, digits: 
 
     confidence_emoji = {
         "high": "\U0001f525",
+        "medium_high": "\U0001f7e2",
         "medium": "\u26a0\ufe0f",
         "low": "\u2753",
     }.get(setup.confidence, "")
@@ -130,7 +131,7 @@ def _format_setup_message(setup: TradeSetup, summary: str, symbol: str, digits: 
         lines.append("\u26a0\ufe0f COUNTER-TREND TRADE")
     if setup.checklist_score:
         score_num = int(setup.checklist_score.split("/")[0]) if "/" in setup.checklist_score else 0
-        cl_emoji = "\U0001f7e2" if score_num >= 10 else "\U0001f7e1" if score_num >= 7 else "\U0001f534"
+        cl_emoji = "\U0001f7e2" if score_num >= 10 else "\U0001f7e2" if score_num >= 8 else "\U0001f7e1" if score_num >= 6 else "\U0001f534"
         lines.append(f"{cl_emoji} ICT Checklist: {setup.checklist_score}")
 
     # Entry distance & status
@@ -150,7 +151,7 @@ def _format_setup_message(setup: TradeSetup, summary: str, symbol: str, digits: 
         f"\U0001f3af TP1: {_fmt(setup.tp1, digits)} ({setup.tp1_pips:.0f} pips) \u2014 close 50%",
         f"\U0001f3af TP2: {_fmt(setup.tp2, digits)} ({setup.tp2_pips:.0f} pips) \u2014 runner",
         f"\U0001f4ca R:R: 1:{setup.rr_tp1:.1f} (TP1) | 1:{setup.rr_tp2:.1f} (TP2)",
-        f"{confidence_emoji} Confidence: {setup.confidence.upper()}",
+        f"{confidence_emoji} Confidence: {setup.confidence.upper().replace('_', '-')}",
         "",
         "Confluence:",
     ]
@@ -222,7 +223,17 @@ async def send_analysis(result: AnalysisResult, auto_queued_indices: set[int] | 
     if auto_queued_indices is None:
         auto_queued_indices = set()
 
+    # Only send Telegram messages for HIGH and MEDIUM_HIGH confidence setups
+    NOTIFY_CONFIDENCES = {"high", "medium_high"}
+
     for i, setup in enumerate(result.setups):
+        confidence = (setup.confidence or "").lower().strip()
+
+        if confidence not in NOTIFY_CONFIDENCES and i not in auto_queued_indices:
+            # Skip Telegram notification for medium/low setups (still logged server-side)
+            logger.info("[%s] Setup %d skipped for Telegram (confidence=%s)", symbol, i, confidence)
+            continue
+
         msg = _format_setup_message(setup, result.market_summary, symbol, digits)
 
         if i in auto_queued_indices:
@@ -383,6 +394,109 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_reply_markup(reply_markup=None)
         await query.message.reply_text(f"\u274c {symbol} setup skipped")
         logger.info("[%s] Setup %s: SKIP selected", symbol, idx)
+
+    elif data.startswith("force_"):
+        # Format: force_GBPJPY_tradeId
+        parts = data.split("_", 2)
+        if len(parts) == 3:
+            symbol = parts[1]
+            trade_id = parts[2]
+        else:
+            await query.message.reply_text("\u26a0\ufe0f Invalid force command.")
+            return
+
+        await query.edit_message_reply_markup(reply_markup=None)
+
+        # Find the watch trade and convert it to a pending trade
+        try:
+            from main import _watch_trades, queue_pending_trade
+            from trade_tracker import log_trade_queued
+
+            watch = _watch_trades.get(symbol)
+            if watch and watch.id == trade_id:
+                # Convert watch → pending trade (same as confirmation success)
+                watch.status = "confirmed"
+                from main import delete_watch
+                delete_watch(watch.id)
+
+                pending = PendingTrade(
+                    id=watch.id,
+                    symbol=symbol,
+                    bias=watch.bias,
+                    entry_min=watch.entry_min,
+                    entry_max=watch.entry_max,
+                    stop_loss=watch.stop_loss,
+                    tp1=watch.tp1,
+                    tp2=watch.tp2,
+                    sl_pips=watch.sl_pips,
+                    confidence=watch.confidence,
+                    tp1_close_pct=watch.tp1_close_pct,
+                )
+                queue_pending_trade(pending)
+
+                # Log to tracker
+                try:
+                    analysis = _last_analyses.get(symbol)
+                    setup = None
+                    if analysis:
+                        for s in analysis.setups:
+                            if s.bias == watch.bias and abs(s.entry_min - watch.entry_min) < 0.01:
+                                setup = s
+                                break
+                    log_trade_queued(
+                        trade_id=watch.id,
+                        symbol=symbol,
+                        bias=watch.bias,
+                        entry_min=watch.entry_min,
+                        entry_max=watch.entry_max,
+                        stop_loss=watch.stop_loss,
+                        tp1=watch.tp1,
+                        tp2=watch.tp2,
+                        sl_pips=watch.sl_pips,
+                        confidence=watch.confidence,
+                        tp1_pips=setup.tp1_pips if setup else 0,
+                        tp2_pips=setup.tp2_pips if setup else 0,
+                        rr_tp1=setup.rr_tp1 if setup else 0,
+                        rr_tp2=setup.rr_tp2 if setup else 0,
+                        h1_trend=setup.h1_trend if setup else "",
+                        counter_trend=setup.counter_trend if setup else False,
+                        raw_response=analysis.raw_response if analysis else "",
+                        trend_alignment=setup.trend_alignment if setup else "",
+                        d1_trend=setup.d1_trend if setup else "",
+                        entry_status="force_executed",
+                        entry_distance_pips=setup.entry_distance_pips if setup else 0,
+                        negative_factors=", ".join(setup.negative_factors) if setup and setup.negative_factors else "",
+                        price_zone=setup.price_zone if setup else "",
+                        h4_trend=setup.h4_trend if setup else "",
+                        checklist_score=watch.checklist_score,
+                    )
+                except Exception as e:
+                    logger.error("Failed to log force-executed trade: %s", e)
+
+                direction = "LONG" if watch.bias == "long" else "SHORT"
+                digits_num = get_profile(symbol).get("digits", 3)
+                await query.message.reply_text(
+                    f"\u26a1 {symbol} {direction} FORCE EXECUTED!\n"
+                    f"Trade ID: {trade_id}\n"
+                    f"Entry: {_fmt(watch.entry_min, digits_num)} - {_fmt(watch.entry_max, digits_num)}\n"
+                    f"SL: {_fmt(watch.stop_loss, digits_num)} | TP1: {_fmt(watch.tp1, digits_num)} | TP2: {_fmt(watch.tp2, digits_num)}\n"
+                    f"\u23f3 Waiting for MT5 EA to pick up..."
+                )
+                logger.info("[%s] Force execute: %s (M1 rejection overridden)", symbol, trade_id)
+            else:
+                await query.message.reply_text(
+                    f"\u26a0\ufe0f Watch trade {trade_id} no longer active for {symbol}."
+                )
+        except Exception as e:
+            logger.error("Force execute error: %s", e)
+            await query.message.reply_text(f"\u26a0\ufe0f Force execute failed: {e}")
+
+    elif data.startswith("dismiss_"):
+        # Just dismiss the force execute button
+        await query.edit_message_reply_markup(reply_markup=None)
+        parts = data.split("_", 2)
+        symbol = parts[1] if len(parts) >= 2 else ""
+        await query.message.reply_text(f"\U0001f44c {symbol} M1 rejection acknowledged")
 
 
 async def _cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -834,7 +948,7 @@ async def send_zone_reached(watch: WatchTrade, attempt: int):
 
 
 async def send_confirmation_result(watch: WatchTrade, confirmed: bool, reasoning: str):
-    """Notify the M1 confirmation result."""
+    """Notify the M1 confirmation result. On rejection, show Force Execute button."""
     if not _app:
         return
     chat_id = TELEGRAM_CHAT_ID
@@ -843,6 +957,8 @@ async def send_confirmation_result(watch: WatchTrade, confirmed: bool, reasoning
 
     direction = "LONG" if watch.bias == "long" else "SHORT"
     remaining = watch.max_confirmations - watch.confirmations_used
+
+    keyboard = None
 
     if confirmed:
         msg = (
@@ -862,8 +978,22 @@ async def send_confirmation_result(watch: WatchTrade, confirmed: bool, reasoning
             f"\u23f3 {status}"
         )
 
+        # Always show Force Execute button on rejection so user can override
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "\u26a1 Force Execute", callback_data=f"force_{watch.symbol}_{watch.id}"
+                    ),
+                    InlineKeyboardButton(
+                        "\u274c Dismiss", callback_data=f"dismiss_{watch.symbol}_{watch.id}"
+                    ),
+                ]
+            ]
+        )
+
     try:
-        await _app.bot.send_message(chat_id=chat_id, text=msg)
+        await _app.bot.send_message(chat_id=chat_id, text=msg, reply_markup=keyboard)
     except Exception as e:
         logger.error("Failed to send confirmation result: %s", e)
 
