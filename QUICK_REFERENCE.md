@@ -1,10 +1,10 @@
-# GBPJPY AI Trade Analyst Bot — Quick Reference
+# AI Trade Bot ICT — Quick Reference
 
 ## System Architecture at a Glance
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    GBPJPY AI Trade Analyst                  │
+│                      AI Trade Bot ICT                       │
 ├─────────────────────────────────────────────────────────────┤
 │                                                              │
 │  MetaTrader 5              FastAPI Server       Claude API  │
@@ -202,7 +202,7 @@ fundamental_cache   -- Cached news/events
 ### Option 1: VPS (Production)
 ```bash
 ssh root@46.225.66.110
-cd GBPJPY-AI-Trade-Analyst-Bot
+cd AI-Trade-Bot-ICT
 git pull origin main
 docker-compose build --no-cache
 docker-compose down && docker-compose up -d
@@ -211,8 +211,8 @@ docker-compose logs -f --tail=50
 
 ### Option 2: Local Development
 ```bash
-git clone https://github.com/manuham/GBPJPY-AI-Trade-Analyst-Bot.git
-cd GBPJPY-AI-Trade-Analyst-Bot
+git clone https://github.com/manuham/AI-Trade-Bot-ICT.git
+cd AI-Trade-Bot-ICT
 cp server/.env.example server/.env
 # Edit server/.env with your API keys
 docker-compose up -d
@@ -312,7 +312,7 @@ Untracked: `Scaling_Roadmap.docx` (future expansion plans)
 curl http://46.225.66.110:8000/health
 
 # View logs
-docker-compose logs -f --tail=100 ai-analyst
+docker-compose logs -f --tail=100 ict-tradebot
 
 # Query latest trades
 sqlite3 /data/trades.db "SELECT symbol, status, p_l FROM trades ORDER BY timestamp DESC LIMIT 5;"
@@ -326,7 +326,7 @@ curl http://46.225.66.110:8000/stats -H "X-API-Key: YOUR_API_KEY"
 
 ## Repository
 
-- **GitHub:** https://github.com/manuham/GBPJPY-AI-Trade-Analyst-Bot
+- **GitHub:** https://github.com/manuham/AI-Trade-Bot-ICT
 - **VPS:** Hetzner (46.225.66.110)
 - **Port:** 8000 (AI Analyst), 8001 (separate scanner — don't touch)
 - **Main branch:** production-ready, clean with 10 files pending commit

@@ -547,7 +547,7 @@ async def _cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Unauthorized.")
         return
 
-    lines = ["\U0001f4ca AI Trade Analyst Status", "\u2501" * 20, "", "\u2705 Bot: Online", ""]
+    lines = ["\U0001f4ca AI Trade Bot ICT Status", "\u2501" * 20, "", "\u2705 Bot: Online", ""]
 
     if _last_scan_times:
         for symbol, scan_time in sorted(_last_scan_times.items()):
@@ -809,7 +809,7 @@ async def _cmd_context(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /help command."""
     msg = (
-        "\U0001f916 AI Trade Analyst Bot\n"
+        "\U0001f916 AI Trade Bot ICT Bot\n"
         + "\u2501" * 20
         + "\n\n"
         "Commands:\n"
@@ -839,7 +839,7 @@ async def _cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command."""
     chat_id = update.effective_chat.id
     await update.message.reply_text(
-        f"\U0001f44b Welcome to AI Trade Analyst Bot!\n\n"
+        f"\U0001f44b Welcome to AI Trade Bot ICT Bot!\n\n"
         f"Your chat ID: {chat_id}\n\n"
         f"Use /help to see available commands."
     )

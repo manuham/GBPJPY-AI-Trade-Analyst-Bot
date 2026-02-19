@@ -1,6 +1,6 @@
 # Workspace Exploration Report — Index
 
-This directory contains a comprehensive exploration of the GBPJPY AI Trade Analyst Bot workspace as of **February 17, 2026**.
+This directory contains a comprehensive exploration of the AI Trade Bot ICT workspace as of **February 17, 2026**.
 
 ## Three Key Documents Generated
 
@@ -88,7 +88,7 @@ This directory contains a comprehensive exploration of the GBPJPY AI Trade Analy
 
 ## Project Status Summary
 
-**GBPJPY AI Trade Analyst Bot v3.0** is an actively developed, well-structured automated trading system that:
+**AI Trade Bot ICT v3.0** is an actively developed, well-structured automated trading system that:
 
 1. **Captures** D1/H4/H1/M5 screenshots at London open (08:00 MEZ)
 2. **Analyzes** using Claude's 3-tier AI (cost-optimized: Sonnet → Opus → Haiku)

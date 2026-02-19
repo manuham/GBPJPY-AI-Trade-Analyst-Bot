@@ -1,6 +1,6 @@
-# GBPJPY AI Trade Analyst Bot (v3.0)
+# AI Trade Bot ICT (v3.0)
 
-Automated GBPJPY trading system using ICT methodology. The MT5 Expert Advisor captures chart screenshots at London open (08:00 MEZ), sends them to Claude for institutional-grade analysis, and manages the full trade lifecycle — from setup detection through smart zone-based entry with M1 confirmation to position close tracking.
+Automated multi-pair forex trading system using ICT (Inner Circle Trader) methodology. The MT5 Expert Advisor captures chart screenshots at kill zone open, sends them to Claude for institutional-grade analysis enriched with live macro/sentiment data, and manages the full trade lifecycle — from setup detection through smart zone-based entry with M1 confirmation to position close tracking.
 
 ## Architecture
 
@@ -76,8 +76,8 @@ MT5 EA (v6.00)                          FastAPI Server (Python)
 
 ```bash
 # 1. Clone and configure
-git clone https://github.com/manuham/GBPJPY-AI-Trade-Analyst-Bot.git
-cd GBPJPY-AI-Trade-Analyst-Bot
+git clone https://github.com/manuham/AI-Trade-Bot-ICT.git
+cd AI-Trade-Bot-ICT
 cp server/.env.example server/.env
 # Edit server/.env with your API keys
 
@@ -95,7 +95,7 @@ See [setup.md](setup.md) for full deployment instructions.
 ```
 ├── mt5/
 │   ├── AI_Analyst.mq5            # MT5 Expert Advisor (v6.00)
-│   ├── GBPJPY_Analyst.mq5       # Legacy EA (deprecated)
+│   ├── GBPJPY_Analyst.mq5       # Legacy single-pair EA (deprecated)
 │   └── SwingLevels.mq5          # Swing high/low indicator (v2.00)
 ├── server/
 │   ├── main.py                   # FastAPI app — endpoints, watch system, trade queue
@@ -109,7 +109,7 @@ See [setup.md](setup.md) for full deployment instructions.
 │   ├── requirements.txt          # Python dependencies
 │   └── .env.example              # Environment variable template
 ├── docs/
-│   ├── GBPJPY_ICT_Strategy_Research.docx
+│   ├── ICT_Strategy_Research.docx
 │   ├── Integration_Notes.md
 │   └── MQL5_Implementation_Spec.md
 ├── Dockerfile
@@ -161,7 +161,7 @@ See [setup.md](setup.md) for full deployment instructions.
 ```bash
 # Update
 ssh root@YOUR_VPS_IP
-cd GBPJPY-AI-Trade-Analyst-Bot
+cd AI-Trade-Bot-ICT
 git pull origin main
 docker-compose build --no-cache && docker-compose down && docker-compose up -d
 

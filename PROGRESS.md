@@ -1,4 +1,4 @@
-# PROGRESS TRACKER — GBPJPY AI Trade Analyst Bot
+# PROGRESS TRACKER — AI Trade Bot ICT
 
 **Last updated:** 2026-02-17
 **Current phase:** Phase 5 IN PROGRESS — Website landing page built, needs commit + Vercel deploy
@@ -147,7 +147,7 @@ git push origin main
 ### Config (already done on VPS):
 ```bash
 # In server/.env on VPS:
-PUBLIC_TELEGRAM_CHANNEL_ID=@gbpjpy_ai_signals  # Manuel's public channel
+PUBLIC_TELEGRAM_CHANNEL_ID=@ict_ai_signals  # Manuel's public channel
 GSHEETS_ENABLED=true
 GSHEETS_SPREADSHEET_ID=1PQE861KiftLTUnN-Lwk-RyrUpDM9yiUuim0Sj8Gc_ZE
 GSHEETS_CREDENTIALS_FILE=/data/gsheets_credentials.json
@@ -276,13 +276,13 @@ GSHEETS_CREDENTIALS_FILE=/data/gsheets_credentials.json
 
 ## VPS Deployment
 
-**Server:** Hetzner, 46.225.66.110, Docker container `ai-analyst` on port 8000
+**Server:** Hetzner, 46.225.66.110, Docker container `ict-tradebot` on port 8000
 **WARNING:** Port 8001 = DIFFERENT project (LongEntry Market Scanner) — NEVER touch it
 
 **Deploy commands:**
 ```bash
 ssh root@46.225.66.110
-cd GBPJPY-AI-Trade-Analyst-Bot
+cd AI-Trade-Bot-ICT
 git pull origin main
 docker-compose build --no-cache && docker-compose down && docker-compose up -d
 ```

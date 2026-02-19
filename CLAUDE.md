@@ -63,7 +63,7 @@ Kill Zone Start: EA captures D1/H4/H1/M5 screenshots + market data
 | `GBPJPY_Analyst.mq5` | Legacy EA (deprecated, kept for reference) |
 
 ### Docs (`/docs/`)
-- `GBPJPY_ICT_Strategy_Research.docx` — ICT methodology research
+- `ICT_Strategy_Research.docx` — ICT methodology research
 - `Integration_Notes.md` — Architecture decisions, endpoint specs, correlation management
 - `MQL5_Implementation_Spec.md` — EA specification, algorithms, pseudocode
 
@@ -208,7 +208,7 @@ Inline buttons: Execute/Skip (for non-auto-queued setups), Force Execute/Dismiss
 
 ## Deployment
 
-- **VPS**: Hetzner (46.225.66.110), Docker container `ai-analyst` on port 8000
+- **VPS**: Hetzner (46.225.66.110), Docker container `ict-tradebot` on port 8000
 - **Build**: `docker-compose build --no-cache && docker-compose down && docker-compose up -d`
 - **SQLite volume**: `./data:/data` (persistent trades.db, fundamentals_cache.db, market_context_cache.db)
 - **Logs**: `./logs:/app/logs`
@@ -236,7 +236,7 @@ GOOGLE_SHEETS_SPREADSHEET_ID=...     # Optional — Google Sheets ID
 ### Updating the server (Python changes only)
 ```bash
 ssh root@46.225.66.110
-cd GBPJPY-AI-Trade-Analyst-Bot
+cd AI-Trade-Bot-ICT
 git pull origin main
 docker-compose build --no-cache && docker-compose down && docker-compose up -d
 ```

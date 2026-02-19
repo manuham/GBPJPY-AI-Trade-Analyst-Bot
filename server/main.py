@@ -257,7 +257,7 @@ def _cleanup_old_screenshots():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    logger.info("Starting AI Trade Analyst server on %s:%s", config.HOST, config.PORT)
+    logger.info("Starting AI Trade Bot ICT server on %s:%s", config.HOST, config.PORT)
     init_db()
     cleanup_stale_open_trades()
 
@@ -344,7 +344,7 @@ async def lifespan(app: FastAPI):
 # FastAPI app
 # ---------------------------------------------------------------------------
 app = FastAPI(
-    title="AI Trade Analyst",
+    title="AI Trade Bot ICT",
     version="3.0.0",
     lifespan=lifespan,
 )
@@ -1145,7 +1145,7 @@ async def public_feed_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Trade Analyst - Public P&L</title>
+    <title>AI Trade Bot ICT - Public P&L</title>
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -1181,7 +1181,7 @@ async def public_feed_html():
 </head>
 <body>
     <div class="container">
-        <h1>AI Trade Analyst &mdash; Public P&L</h1>
+        <h1>AI Trade Bot ICT &mdash; Public P&L</h1>
         <p class="subtitle">ICT Methodology &bull; AI-Powered Analysis &bull; Full Transparency</p>
 
         <div class="stats-grid">

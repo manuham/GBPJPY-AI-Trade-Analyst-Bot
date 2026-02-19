@@ -3,7 +3,7 @@
 //|                         Swing High/Low Horizontal Level Indicator |
 //|                         Draws clean S/R lines for AI analysis     |
 //+------------------------------------------------------------------+
-#property copyright "AI Trade Analyst Bot"
+#property copyright "AI Trade Bot ICT"
 #property link      ""
 #property version   "2.00"
 #property indicator_chart_window

@@ -1,4 +1,4 @@
-# GBPJPY AI Trade Analyst Bot — Setup Guide
+# AI Trade Bot ICT — Setup Guide
 
 ## Architecture
 
@@ -30,7 +30,7 @@ Three components:
 
 1. Open Telegram and search for **@BotFather**
 2. Send `/newbot`
-3. Choose a name (e.g., "GBPJPY Analyst") and username (e.g., `gbpjpy_analyst_bot`)
+3. Choose a name (e.g., "ICT Trade Bot") and username (e.g., `ict_tradebot`)
 4. Copy the **bot token** — you'll need it later
 5. Send a message to your new bot (just say "hello")
 6. Get your **chat ID**: search for **@userinfobot** on Telegram, start it, and it will show your chat ID
@@ -61,8 +61,8 @@ curl -fsSL https://get.docker.com | sh
 ### 3.2 — Clone the repository
 
 ```bash
-git clone https://github.com/manuham/GBPJPY-AI-Trade-Analyst-Bot.git
-cd GBPJPY-AI-Trade-Analyst-Bot
+git clone https://github.com/manuham/AI-Trade-Bot-ICT.git
+cd AI-Trade-Bot-ICT
 ```
 
 ### 3.3 — Configure environment variables
@@ -144,11 +144,11 @@ ufw allow 8000/tcp
    MQL5/Indicators/SwingLevels.mq5
    ```
 2. Compile in MetaEditor (F7)
-3. Drag onto your GBPJPY chart — it draws swing high/low levels
+3. Drag onto your chart — it draws swing high/low levels
 
-### 4.4 — Attach the EA to a GBPJPY chart
+### 4.4 — Attach the EA to a chart
 
-1. Open a **GBPJPY** chart (any timeframe — the EA opens its own temporary charts)
+1. Open a chart for your desired pair (any timeframe — the EA opens its own temporary charts)
 2. Drag **AI_Analyst** from the Navigator onto the chart
 3. In the **Inputs** tab, configure:
 

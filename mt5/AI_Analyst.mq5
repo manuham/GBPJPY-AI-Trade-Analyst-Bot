@@ -1,11 +1,11 @@
 //+------------------------------------------------------------------+
 //|                                                  AI_Analyst.mq5  |
-//|                   AI Trade Analyst Bot v6.0                        |
+//|                   AI Trade Bot ICT v6.0                             |
 //|                   Smart Entry: M1 Confirmation + London Kill Zone  |
 //|                   Break-even after TP1, trailing stop to TP1       |
 //|                   Leader/follower mode for multi-account           |
 //+------------------------------------------------------------------+
-#property copyright "AI Trade Analyst Bot"
+#property copyright "AI Trade Bot ICT"
 #property link      ""
 #property version   "6.00"
 #property strict
@@ -1080,8 +1080,8 @@ void DrawInfoPanel()
    int textX = panelX + panelW - padX;  // Left edge of text inside panel
    int curY  = panelY + padY;
 
-   //--- Title: "AI Trade Analyst"
-   CreatePanelLabel("AI_PanelTitle", textX, curY, "AI Trade Analyst", "Arial Bold", 11, clrWhite);
+   //--- Title: "AI Trade Bot ICT"
+   CreatePanelLabel("AI_PanelTitle", textX, curY, "AI Trade Bot ICT", "Arial Bold", 11, clrWhite);
    curY += lineH;
 
    //--- Separator line (using thin text)

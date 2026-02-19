@@ -1,7 +1,7 @@
 services:
-  ai-analyst:
+  ict-tradebot:
     build: .
-    container_name: ai-analyst
+    container_name: ict-tradebot
     restart: unless-stopped
     ports:
       - "8000:8000"
@@ -35,7 +35,7 @@ services:
     volumes:
       - ./data:/data
     depends_on:
-      - ai-analyst
+      - ict-tradebot
     logging:
       driver: "json-file"
       options:

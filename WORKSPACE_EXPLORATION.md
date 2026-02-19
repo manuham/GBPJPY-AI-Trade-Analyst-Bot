@@ -1,4 +1,4 @@
-# GBPJPY AI Trade Analyst Bot — Workspace Analysis
+# AI Trade Bot ICT — Workspace Analysis
 
 **Report Date:** February 17, 2026  
 **Project Status:** Active Development (v3.0)  
@@ -390,7 +390,7 @@ curl http://46.225.66.110:8000/health
 
 ## 17. SUMMARY
 
-**GBPJPY AI Trade Analyst Bot** is a well-structured, actively developed automated trading system at v3.0. It combines:
+**AI Trade Bot ICT** is a well-structured, actively developed automated trading system at v3.0. It combines:
 
 - **Intelligent analysis** via Claude's three-tier API (cost-optimized)
 - **Smart entry** with M1 confirmation (no blind orders)

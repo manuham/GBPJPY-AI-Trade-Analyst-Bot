@@ -123,7 +123,7 @@ def generate_monthly_pdf(
     elements = []
 
     # Header
-    elements.append(Paragraph("AI Trade Analyst", title_style))
+    elements.append(Paragraph("AI Trade Bot ICT", title_style))
     elements.append(Paragraph(
         f"Monthly Performance Report &mdash; {month_name}<br/>"
         f"ICT Methodology &bull; AI-Powered &bull; Full Transparency",
@@ -234,7 +234,7 @@ def generate_monthly_pdf(
         alignment=TA_CENTER,
     )
     elements.append(Paragraph(
-        "Generated automatically by AI Trade Analyst &bull; "
+        "Generated automatically by AI Trade Bot ICT &bull; "
         "Past performance does not guarantee future results &bull; "
         "Trading forex carries significant risk",
         disclaimer_style,

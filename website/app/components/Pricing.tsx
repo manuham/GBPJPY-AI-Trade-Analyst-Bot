@@ -20,7 +20,7 @@ const tiers = [
     period: "/month",
     description: "Real-time signals for one pair.",
     features: [
-      "Live GBPJPY signals via Telegram",
+      "Live trade signals via Telegram",
       "Real-time entry, SL & TP levels",
       "ICT analysis breakdown",
       "Email support",

@@ -74,14 +74,14 @@ export default function Footer() {
           }}
         >
           Trading forex involves significant risk. Past performance does not guarantee
-          future results. AI Trade Analyst provides analysis, not financial advice.
+          future results. AI Trade Bot ICT provides analysis, not financial advice.
           Always do your own research and never trade with money you cannot afford
           to lose.
         </p>
 
         {/* Copyright */}
         <p style={{ fontSize: 13, color: "var(--text-secondary)", opacity: 0.5 }}>
-          &copy; {new Date().getFullYear()} AI Trade Analyst. All rights reserved.
+          &copy; {new Date().getFullYear()} AI Trade Bot ICT. All rights reserved.
         </p>
       </div>
     </footer>

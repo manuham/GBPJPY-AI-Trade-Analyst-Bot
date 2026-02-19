@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-PUBLIC_CHANNEL_ID = os.getenv("PUBLIC_TELEGRAM_CHANNEL_ID", "")  # e.g. "@gbpjpy_signals"
+PUBLIC_CHANNEL_ID = os.getenv("PUBLIC_TELEGRAM_CHANNEL_ID", "")  # e.g. "@ict_ai_signals"
 
 # Google Sheets config
 GSHEETS_ENABLED = os.getenv("GSHEETS_ENABLED", "false").lower() == "true"

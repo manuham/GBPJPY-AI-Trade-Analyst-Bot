@@ -1,4 +1,4 @@
-# AI Trade Analyst Bot — Integration Notes
+# AI Trade Bot ICT — Integration Notes
 
 > Architecture guide for the MT5 EA ↔ FastAPI server ↔ Claude API analysis pipeline, Telegram alerting, and multi-pair portfolio management.
 >
@@ -496,7 +496,7 @@ The EA operates as a state machine:
 
 ```bash
 ssh root@46.225.66.110
-cd GBPJPY-AI-Trade-Analyst-Bot
+cd AI-Trade-Bot-ICT
 git pull origin main
 docker-compose build --no-cache && docker-compose down && docker-compose up -d
 ```

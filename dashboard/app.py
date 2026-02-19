@@ -1,4 +1,4 @@
-# GBPJPY AI Trade Analyst — Streamlit Dashboard
+# AI Trade Bot ICT — Streamlit Dashboard
 """Web dashboard for monitoring live trades, performance analytics,
 trade journal, backtest results, and risk management."""
 
@@ -27,7 +27,7 @@ import historical_data as hd
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-API_BASE = os.getenv("API_BASE_URL", "http://ai-analyst:8000")
+API_BASE = os.getenv("API_BASE_URL", "http://ict-tradebot:8000")
 API_KEY = os.getenv("API_KEY", "")
 REFRESH_INTERVAL = 30  # seconds for live monitor
 
@@ -35,7 +35,7 @@ REFRESH_INTERVAL = 30  # seconds for live monitor
 # Page config
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="GBPJPY AI Trade Analyst",
+    page_title="AI Trade Bot ICT",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -62,7 +62,7 @@ try:
 except ImportError:
     ACTIVE_PAIRS = ["GBPJPY"]
 
-st.sidebar.title("📈 AI Trade Analyst")
+st.sidebar.title("📈 AI Trade Bot ICT")
 st.sidebar.markdown("---")
 
 # Pair selector
