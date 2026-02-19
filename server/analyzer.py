@@ -14,6 +14,7 @@ import anthropic
 from PIL import Image
 
 from config import ANTHROPIC_API_KEY
+from market_context import build_market_context
 from models import AnalysisResult, MarketData, TradeSetup
 from pair_profiles import get_profile
 from trade_tracker import get_recent_closed_for_pair
@@ -678,6 +679,18 @@ async def analyze_charts_full(
     use_web_search = fundamentals is None
     system_prompt = build_system_prompt(symbol, profile, fundamentals)
 
+    # Inject market context (COT, sentiment, rates, intermarket — all free APIs)
+    try:
+        market_ctx = await build_market_context(symbol, profile)
+        if market_ctx:
+            user_content.append({
+                "type": "text",
+                "text": f"--- {market_ctx}",
+            })
+            logger.info("[%s] Market context injected (%d chars)", symbol, len(market_ctx))
+    except Exception as e:
+        logger.warning("[%s] Market context fetch failed (non-fatal): %s", symbol, e)
+
     # Inject performance feedback (Feature 5)
     perf_feedback = _build_performance_feedback(symbol)
     if perf_feedback:
@@ -872,6 +885,18 @@ async def confirm_entry(
     if confluence:
         confluence_text = f"\nOriginal confluence: {', '.join(confluence[:3])}"
 
+    # Quick sentiment check for M1 context (cached, no extra API call)
+    sentiment_text = ""
+    try:
+        from market_context import fetch_retail_sentiment
+        sentiment = await fetch_retail_sentiment(symbol)
+        if sentiment:
+            contrarian = sentiment.get("contrarian_signal", "neutral")
+            if contrarian != "neutral":
+                sentiment_text = f"\nRetail sentiment: {sentiment['pct_long']:.0f}% long / {sentiment['pct_short']:.0f}% short (contrarian {contrarian})"
+    except Exception:
+        pass
+
     system_prompt = f"""You are a fast M1 price-action reader for {symbol}. Your ONLY job is to check if there is a {direction} reaction forming on the M1 chart right now.
 
 CRITICAL: Focus ONLY on the LAST 5 candles (the rightmost candles on the chart). Ignore everything else — the higher timeframe analysis has already been done and confirmed this is a valid setup. You are just checking for a basic reaction at the zone.
@@ -912,7 +937,7 @@ Respond with ONLY this JSON:
                 f"Entry zone: {entry_min:.{digits}f} - {entry_max:.{digits}f}\n"
                 f"Current price: {current_price:.{digits}f}\n"
                 f"Looking for: {direction} reaction at this zone"
-                f"{confluence_text}\n\n"
+                f"{confluence_text}{sentiment_text}\n\n"
                 f"Is there a {direction} reaction on M1? JSON only."
             ),
         },

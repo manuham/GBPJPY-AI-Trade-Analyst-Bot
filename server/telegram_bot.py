@@ -783,6 +783,29 @@ async def _cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info("User reset %d stale open trades via /reset", count)
 
 
+async def _cmd_context(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /context command — show current macro/sentiment data."""
+    chat_id = str(update.effective_chat.id)
+    if TELEGRAM_CHAT_ID and chat_id != TELEGRAM_CHAT_ID:
+        await update.message.reply_text("Unauthorized.")
+        return
+
+    symbol = "GBPJPY"
+    if context.args:
+        symbol = context.args[0].upper()
+
+    await update.message.reply_text(f"\U0001f50d Fetching market context for {symbol}...")
+
+    try:
+        from market_context import get_context_summary
+        profile = get_profile(symbol)
+        summary = await get_context_summary(symbol, profile)
+        await update.message.reply_text(summary)
+    except Exception as e:
+        logger.error("Context command error: %s", e)
+        await update.message.reply_text(f"\u274c Failed to fetch context: {e}")
+
+
 async def _cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /help command."""
     msg = (
@@ -792,6 +815,7 @@ async def _cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Commands:\n"
         "/scan - Re-scan last pair or /scan GBPJPY\n"
         "/stats - Performance stats or /stats GBPJPY 7\n"
+        "/context - Show macro/sentiment data (COT, rates, sentiment)\n"
         "/report - Weekly performance breakdown by pattern\n"
         "/drawdown - Daily P&L and risk status\n"
         "/news - Show upcoming high-impact news events\n"
@@ -1262,6 +1286,7 @@ def create_bot_app() -> Application:
     _app.add_handler(CommandHandler("status", _cmd_status))
     _app.add_handler(CommandHandler("help", _cmd_help))
     _app.add_handler(CommandHandler("report", _cmd_report))
+    _app.add_handler(CommandHandler("context", _cmd_context))
     _app.add_handler(CommandHandler("backtest", _cmd_backtest))
     _app.add_handler(CallbackQueryHandler(_handle_callback))
 

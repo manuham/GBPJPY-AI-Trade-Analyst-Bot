@@ -27,3 +27,9 @@ ACTIVE_PAIRS: list[str] = [
 # Analysis model — switch between Opus and Sonnet 4.5 for A/B testing
 # Default: Opus. Set to "claude-sonnet-4-5-20250929" to test with Sonnet.
 ANALYSIS_MODEL: str = os.getenv("ANALYSIS_MODEL", "claude-opus-4-20250514")
+
+# External data API keys (all optional — free tiers)
+# API Ninjas: https://api-ninjas.com/ — 10K requests/month free
+API_NINJAS_KEY: str = os.getenv("API_NINJAS_KEY", "")
+# FRED: https://fred.stlouisfed.org/docs/api/api_key.html — free
+FRED_API_KEY: str = os.getenv("FRED_API_KEY", "")
